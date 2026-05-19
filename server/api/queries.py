@@ -354,7 +354,7 @@ def search_dependencies(
     if product_version:
         query = query.filter(Product.version == product_version)
 
-    results = query.order_by(Dependency.dependency_name).offset(offset).limit(limit).all()
+    results = query.order_by(Dependency.id).offset(offset).limit(limit).all()
 
     return [
         DependencyResponse(
