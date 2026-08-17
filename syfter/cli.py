@@ -954,20 +954,54 @@ def list_products(ctx, name_filter):
 
 
 @main.command("delete")
-@click.option("-p", "--product", required=True, help="Product name")
-@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("-p", "--product", help="Product name")
+@click.option("-v", "--version", "product_version", help="Product version")
+@click.option("--scan", "scan_id", type=int, help="Delete a single scan by ID")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
-def delete_product_cmd(ctx, product, product_version, yes):
-    """Delete a product and all its scans.
+def delete_product_cmd(ctx, product, product_version, scan_id, yes):
+    """Delete a product (and all its scans) or a single scan.
 
-    This permanently removes the product, all its scans, packages, and file records.
-
-    Example:
+    Examples:
         syfter delete -p myproduct -v 1.0
-        syfter delete -p myproduct -v 1.0 --yes  # Skip confirmation
+        syfter delete --scan 42
+        syfter delete -p myproduct -v 1.0 --yes
     """
-    # Confirm deletion unless --yes is provided
+    if scan_id and product:
+        console.print("[red]Use either --scan or -p/-v, not both[/red]")
+        sys.exit(1)
+    if not scan_id and not product:
+        console.print("[red]Specify --scan ID or -p PRODUCT -v VERSION[/red]")
+        sys.exit(1)
+    if product and not product_version:
+        console.print("[red]-v/--version is required with -p/--product[/red]")
+        sys.exit(1)
+
+    if scan_id:
+        if not yes:
+            confirm = click.confirm(f"Delete scan #{scan_id}?", default=False)
+            if not confirm:
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+
+        if ctx.obj["local_mode"]:
+            console.print("[red]Error: scan deletion requires server mode[/red]")
+            sys.exit(1)
+
+        import httpx
+        from .client import SyfterClient, APIError
+        try:
+            with SyfterClient(ctx.obj["server_url"]) as client:
+                client.delete_scan(scan_id)
+                console.print(f"[green]Deleted scan #{scan_id}[/green]")
+        except httpx.ConnectError:
+            console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+            sys.exit(1)
+        except APIError as e:
+            console.print(f"[red]Delete failed: {e}[/red]")
+            sys.exit(1)
+        return
+
     if not yes:
         confirm = click.confirm(
             f"Delete product '{product}-{product_version}' and all its data?",
@@ -982,7 +1016,7 @@ def delete_product_cmd(ctx, product, product_version, yes):
         storage = Storage()
         deleted = storage.delete_product(product, product_version)
         if deleted:
-            console.print(f"[green]✓ Deleted {product}-{product_version}[/green]")
+            console.print(f"[green]Deleted {product}-{product_version}[/green]")
         else:
             console.print(f"[red]Product {product}-{product_version} not found[/red]")
             sys.exit(1)
@@ -992,13 +1026,175 @@ def delete_product_cmd(ctx, product, product_version, yes):
         try:
             with SyfterClient(ctx.obj["server_url"]) as client:
                 client.delete_product(product, product_version)
-                console.print(f"[green]✓ Deleted {product}-{product_version}[/green]")
+                console.print(f"[green]Deleted {product}-{product_version}[/green]")
         except httpx.ConnectError:
             console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
             sys.exit(1)
         except APIError as e:
             console.print(f"[red]Delete failed: {e}[/red]")
             sys.exit(1)
+
+
+@main.command("rename")
+@click.option("-p", "--product", required=True, help="Current product name")
+@click.option("-v", "--version", "product_version", required=True, help="Current product version")
+@click.option("--name", "new_name", help="New product name")
+@click.option("--new-version", "new_version", help="New product version")
+@click.option("--description", "new_description", help="New description")
+@click.pass_context
+def rename_product_cmd(ctx, product, product_version, new_name, new_version, new_description):
+    """Rename or relabel a product.
+
+    Examples:
+        syfter rename -p rhel -v 10.1 --name rhel-baseos
+        syfter rename -p rhel -v 10.1 --new-version 10.1-baseos
+        syfter rename -p rhel -v 10.1 --description "RHEL 10.1 BaseOS x86_64"
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: rename requires server mode[/red]")
+        sys.exit(1)
+
+    if not any([new_name, new_version, new_description]):
+        console.print("[yellow]Nothing to change. Use --name, --new-version, or --description.[/yellow]")
+        return
+
+    import httpx
+    from .client import SyfterClient, APIError
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            result = client.rename_product(
+                product, product_version,
+                new_name=new_name,
+                new_version=new_version,
+                new_description=new_description,
+            )
+            display_name = result.get("name", new_name or product)
+            display_version = result.get("version", new_version or product_version)
+            console.print(f"[green]Renamed to {display_name}-{display_version}[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Rename failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.group("tag")
+@click.pass_context
+def tag_group(ctx):
+    """Manage tags (list, rename, delete)."""
+    pass
+
+
+@tag_group.command("list")
+@click.option("-n", "--name", help="Filter by tag name (use %% as wildcard)")
+@click.option("--limit", type=int, default=100, help="Maximum results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def tag_list(ctx, name, limit, output_json):
+    """List all tags with scan counts."""
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: tags require server mode[/red]")
+        sys.exit(1)
+
+    import httpx
+    from .client import SyfterClient, APIError
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            results = client.list_tags(name=name, limit=limit)
+            if output_json:
+                click.echo(json.dumps(results, indent=2))
+                return
+            if not results:
+                console.print("[yellow]No tags found[/yellow]")
+                return
+            table = Table(title="Tags", box=box.SIMPLE)
+            table.add_column("ID", style="dim")
+            table.add_column("Name", style="cyan")
+            table.add_column("Scans", justify="right", style="green")
+            for t in results:
+                table.add_row(str(t["id"]), t["name"], str(t.get("scan_count", 0)))
+            console.print(table)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Failed to list tags: {e}[/red]")
+        sys.exit(1)
+
+
+@tag_group.command("rename")
+@click.argument("old_name")
+@click.argument("new_name")
+@click.pass_context
+def tag_rename(ctx, old_name, new_name):
+    """Rename a tag.
+
+    Examples:
+        syfter tag rename old-tag-name new-tag-name
+        syfter tag rename "old tag" "new tag"
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: tags require server mode[/red]")
+        sys.exit(1)
+
+    import httpx
+    from .client import SyfterClient, APIError
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            tags = client.list_tags(name=old_name)
+            matching = [t for t in tags if t["name"] == old_name]
+            if not matching:
+                console.print(f"[red]Tag '{old_name}' not found[/red]")
+                sys.exit(1)
+            result = client.rename_tag(matching[0]["id"], new_name)
+            console.print(f"[green]Renamed '{old_name}' to '{result['name']}'[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Rename failed: {e}[/red]")
+        sys.exit(1)
+
+
+@tag_group.command("delete")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def tag_delete(ctx, name, yes):
+    """Delete a tag (does not delete the scans).
+
+    Examples:
+        syfter tag delete old-tag
+        syfter tag delete old-tag --yes
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: tags require server mode[/red]")
+        sys.exit(1)
+
+    if not yes:
+        confirm = click.confirm(f"Delete tag '{name}'?", default=False)
+        if not confirm:
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+
+    import httpx
+    from .client import SyfterClient, APIError
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            tags = client.list_tags(name=name)
+            matching = [t for t in tags if t["name"] == name]
+            if not matching:
+                console.print(f"[red]Tag '{name}' not found[/red]")
+                sys.exit(1)
+            client.delete_tag(matching[0]["id"])
+            console.print(f"[green]Deleted tag '{name}'[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Delete failed: {e}[/red]")
+        sys.exit(1)
 
 
 @main.command("stats")

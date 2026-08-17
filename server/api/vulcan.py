@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from ..auth import require_write
 from ..db import (
     get_db,
     ComponentRelationship,
@@ -290,7 +291,7 @@ def _build_trackers(categorized: dict):
     return trackers
 
 
-@router.post("/analyze", response_model=VulcanAnalysisResponse, status_code=201)
+@router.post("/analyze", response_model=VulcanAnalysisResponse, status_code=201, dependencies=[Depends(require_write)])
 def analyze(body: VulcanAnalyzeRequest, db: Session = Depends(get_db)):
     """Run a VULCAN CVE impact analysis with layer deduplication."""
 
@@ -469,7 +470,7 @@ def get_analysis(analysis_id: int, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/analyses/{analysis_id}/resolve", status_code=200)
+@router.post("/analyses/{analysis_id}/resolve", status_code=200, dependencies=[Depends(require_write)])
 def resolve_analysis(
     analysis_id: int,
     body: VulcanResolveRequest,
@@ -508,7 +509,7 @@ def resolve_analysis(
     }
 
 
-@router.delete("/analyses/{analysis_id}", status_code=204)
+@router.delete("/analyses/{analysis_id}", status_code=204, dependencies=[Depends(require_write)])
 def delete_analysis(analysis_id: int, db: Session = Depends(get_db)):
     """Delete a VULCAN analysis and its trackers."""
     analysis = db.query(VulcanAnalysis).filter(VulcanAnalysis.id == analysis_id).first()

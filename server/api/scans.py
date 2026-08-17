@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_config
 from ..db import get_db, Product, Scan, Package, File as FileModel, ImageLayer, Attestation, Tag, ScanTag
+from ..auth import require_write
 from ..storage import get_storage
 from .queries import invalidate_stats_cache
 from .schemas import (
@@ -297,7 +298,7 @@ def get_scan(scan_id: int, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/upload", response_model=ScanResponse, status_code=201)
+@router.post("/upload", response_model=ScanResponse, status_code=201, dependencies=[Depends(require_write)])
 async def upload_scan(
     product_name: str = Form(...),
     product_version: str = Form(...),
@@ -809,7 +810,7 @@ async def upload_scan(
     )
 
 
-@router.post("/import", response_model=ImportResponse, status_code=201)
+@router.post("/import", response_model=ImportResponse, status_code=201, dependencies=[Depends(require_write)])
 async def import_sbom(
     product_name: str = Form(...),
     product_version: str = Form(...),
@@ -1012,7 +1013,7 @@ async def import_sbom(
     )
 
 
-@router.post("/import-packages", response_model=ScanResponse, status_code=201)
+@router.post("/import-packages", response_model=ScanResponse, status_code=201, dependencies=[Depends(require_write)])
 async def import_packages(
     product_name: str = Form(..., description="Product or project identifier"),
     product_version: str = Form("latest", description="Version label (default: latest)"),
@@ -1226,20 +1227,26 @@ async def import_packages(
     )
 
 
-@router.delete("/{scan_id}", status_code=204)
+@router.delete("/{scan_id}", status_code=204, dependencies=[Depends(require_write)])
 def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     """Delete a scan and its associated data."""
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    # Delete from storage
+    # Delete SBOM files from storage
     storage = get_storage()
     try:
         storage.delete(scan.original_sbom_key)
         storage.delete(scan.modified_sbom_key)
     except Exception:
-        pass  # Ignore storage errors during deletion
+        pass
+    # Delete attestation S3 objects
+    for att in db.query(Attestation).filter(Attestation.scan_id == scan_id).all():
+        try:
+            storage.delete(att.attestation_key)
+        except Exception:
+            pass
 
     # Use raw SQL for fast deletion
     connection = db.connection()
@@ -1253,6 +1260,8 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM scan_tags WHERE scan_id = {param}", (scan_id,))
+    cursor.execute(f"DELETE FROM image_layers WHERE scan_id = {param}", (scan_id,))
+    cursor.execute(f"DELETE FROM attestations WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM scans WHERE id = {param}", (scan_id,))
     raw_conn.commit()
     db.expire_all()
@@ -1282,7 +1291,7 @@ def list_scan_tags(scan_id: int, db: Session = Depends(get_db)):
     ]
 
 
-@router.post("/{scan_id}/tags", response_model=List[TagResponse])
+@router.post("/{scan_id}/tags", response_model=List[TagResponse], dependencies=[Depends(require_write)])
 def add_scan_tags(scan_id: int, body: TagCreate, db: Session = Depends(get_db)):
     """Add tags to a scan, auto-creating tags that don't exist."""
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
@@ -1295,7 +1304,7 @@ def add_scan_tags(scan_id: int, body: TagCreate, db: Session = Depends(get_db)):
     return list_scan_tags(scan_id, db)
 
 
-@router.delete("/{scan_id}/tags/{tag_name}", status_code=204)
+@router.delete("/{scan_id}/tags/{tag_name}", status_code=204, dependencies=[Depends(require_write)])
 def remove_scan_tag(scan_id: int, tag_name: str, db: Session = Depends(get_db)):
     """Remove a tag from a scan. Does not delete the tag itself."""
     scan = db.query(Scan).filter(Scan.id == scan_id).first()

@@ -321,6 +321,50 @@ class SyfterClient:
         if response.status_code >= 400:
             self._handle_response(response)
 
+    def rename_product(
+        self,
+        product_name: str,
+        product_version: str,
+        new_name: Optional[str] = None,
+        new_version: Optional[str] = None,
+        new_description: Optional[str] = None,
+    ) -> dict:
+        """Rename or update a product."""
+        body = {}
+        if new_name is not None:
+            body["name"] = new_name
+        if new_version is not None:
+            body["version"] = new_version
+        if new_description is not None:
+            body["description"] = new_description
+        response = self.client.patch(
+            self._url(f"/products/{product_name}/{product_version}"),
+            json=body,
+        )
+        return self._handle_response(response)
+
+    def list_tags(self, name: Optional[str] = None, limit: int = 100) -> list:
+        """List all tags."""
+        params = {"limit": limit}
+        if name:
+            params["name"] = name
+        response = self.client.get(self._url("/tags/"), params=params)
+        return self._handle_response(response)
+
+    def rename_tag(self, tag_id: int, new_name: str) -> dict:
+        """Rename a tag."""
+        response = self.client.patch(
+            self._url(f"/tags/{tag_id}"),
+            json={"name": new_name},
+        )
+        return self._handle_response(response)
+
+    def delete_tag(self, tag_id: int) -> None:
+        """Delete a tag."""
+        response = self.client.delete(self._url(f"/tags/{tag_id}"))
+        if response.status_code >= 400:
+            self._handle_response(response)
+
     # Job-based upload operations (for large scans)
     def upload_scan_async(
         self,

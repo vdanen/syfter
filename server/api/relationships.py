@@ -10,6 +10,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, aliased
 
+from ..auth import require_write
 from ..db import get_db, Product, Scan, ComponentRelationship
 from ..storage import get_storage
 from .schemas import ComponentRelationshipCreate, ComponentRelationshipResponse
@@ -69,7 +70,7 @@ def list_relationships(
     ]
 
 
-@router.post("/", response_model=ComponentRelationshipResponse, status_code=201)
+@router.post("/", response_model=ComponentRelationshipResponse, status_code=201, dependencies=[Depends(require_write)])
 def create_relationship(
     body: ComponentRelationshipCreate,
     db: Session = Depends(get_db),
@@ -137,7 +138,7 @@ def create_relationship(
     )
 
 
-@router.delete("/{relationship_id}", status_code=204)
+@router.delete("/{relationship_id}", status_code=204, dependencies=[Depends(require_write)])
 def delete_relationship(relationship_id: int, db: Session = Depends(get_db)):
     """Delete a component relationship."""
     cr = db.query(ComponentRelationship).filter(ComponentRelationship.id == relationship_id).first()
@@ -180,7 +181,7 @@ def _extract_spdx_build_tools(sbom: dict) -> list:
     return bases
 
 
-@router.post("/backfill")
+@router.post("/backfill", dependencies=[Depends(require_write)])
 def backfill_build_tool_relationships(
     db: Session = Depends(get_db),
 ):
