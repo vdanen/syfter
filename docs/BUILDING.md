@@ -372,6 +372,10 @@ syfter --version
 ./scripts/run-tests.sh coverage
 ```
 
+The test runner installs the editable project with the `[all]` extra before
+running tests. This includes both the test tools and server dependencies, which
+the test modules import during collection.
+
 ### Using pip
 
 ```bash
