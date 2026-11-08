@@ -134,6 +134,7 @@ async def auth_middleware(request: Request, call_next):
     if not config.auth_enabled:
         request.state.team_name = "anonymous"
         request.state.api_key_id = None
+        request.state.role = "admin"
         return await call_next(request)
 
     # Skip auth for exempt paths and dashboard static files
@@ -153,6 +154,7 @@ async def auth_middleware(request: Request, call_next):
                 username = claims.get("preferred_username") or claims.get("sub", "unknown")
                 request.state.team_name = username
                 request.state.api_key_id = None
+                request.state.role = "write"
                 return await call_next(request)
             return JSONResponse(
                 status_code=401,
@@ -175,6 +177,7 @@ async def auth_middleware(request: Request, call_next):
             )
         request.state.team_name = cached["team_name"]
         request.state.api_key_id = cached["id"]
+        request.state.role = cached.get("role", "write")
         return await call_next(request)
 
     # Look up in database
@@ -201,15 +204,18 @@ async def auth_middleware(request: Request, call_next):
         db_key.last_used_at = datetime.utcnow()
         db.commit()
 
+        role = getattr(db_key, "role", None) or ("admin" if db_key.is_admin else "write")
         _cache_set(key_hash, {
             "valid": True,
             "id": db_key.id,
             "team_name": db_key.team_name,
             "is_admin": db_key.is_admin,
+            "role": role,
         })
 
         request.state.team_name = db_key.team_name
         request.state.api_key_id = db_key.id
+        request.state.role = role
     finally:
         db.close()
 
@@ -218,16 +224,18 @@ async def auth_middleware(request: Request, call_next):
 
 def require_admin(request: Request):
     """FastAPI dependency that requires an admin API key."""
-    api_key = request.headers.get("X-API-Key")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="Missing API key")
-
-    key_hash = _hash_key(api_key)
-    cached = _cache_get(key_hash)
-    if cached and cached.get("valid") and cached.get("is_admin"):
-        return cached
-
+    role = getattr(request.state, "role", None)
+    if role == "admin":
+        return
     raise HTTPException(status_code=403, detail="Admin API key required")
+
+
+def require_write(request: Request):
+    """FastAPI dependency that requires write (or admin) access."""
+    role = getattr(request.state, "role", None)
+    if role in ("write", "admin"):
+        return
+    raise HTTPException(status_code=403, detail="Write access required (your key is read-only)")
 
 
 def seed_admin_key(db: Session, admin_key: Optional[str] = None):
@@ -252,6 +260,7 @@ def seed_admin_key(db: Session, admin_key: Optional[str] = None):
         team_name="admin",
         description="Auto-generated admin key",
         is_admin=True,
+        role="admin",
     )
     db.add(db_key)
     db.commit()
@@ -267,6 +276,7 @@ class ApiKeyCreateRequest(BaseModel):
     team_name: str = Field(..., description="Team name this key belongs to")
     description: Optional[str] = Field(default=None, description="Key description")
     expires_in_days: Optional[int] = Field(default=None, description="Days until expiration")
+    role: str = Field(default="write", description="Key role: read, write, or admin")
 
 
 class ApiKeyResponse(BaseModel):
@@ -276,6 +286,7 @@ class ApiKeyResponse(BaseModel):
     description: Optional[str]
     is_active: bool
     is_admin: bool
+    role: str = "write"
     created_at: datetime
     last_used_at: Optional[datetime]
     expires_at: Optional[datetime]
@@ -296,6 +307,9 @@ def create_api_key(
     db: Session = Depends(get_db),
 ):
     """Create a new API key. Returns the plaintext key exactly once."""
+    if body.role not in ("read", "write", "admin"):
+        raise HTTPException(status_code=400, detail="role must be read, write, or admin")
+
     api_key = secrets.token_hex(32)
     key_hash = _hash_key(api_key)
 
@@ -309,6 +323,8 @@ def create_api_key(
         team_name=body.team_name,
         description=body.description,
         expires_at=expires_at,
+        role=body.role,
+        is_admin=(body.role == "admin"),
     )
     db.add(db_key)
     db.commit()
@@ -321,6 +337,7 @@ def create_api_key(
         description=db_key.description,
         is_active=db_key.is_active,
         is_admin=db_key.is_admin,
+        role=db_key.role,
         created_at=db_key.created_at,
         last_used_at=db_key.last_used_at,
         expires_at=db_key.expires_at,
@@ -344,6 +361,7 @@ def list_api_keys(
             description=k.description,
             is_active=k.is_active,
             is_admin=k.is_admin,
+            role=getattr(k, "role", "admin" if k.is_admin else "write"),
             created_at=k.created_at,
             last_used_at=k.last_used_at,
             expires_at=k.expires_at,

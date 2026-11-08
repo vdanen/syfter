@@ -78,6 +78,22 @@ class ProductResponse(BaseModel):
         from_attributes = True
 
 
+class ProductUpdate(BaseModel):
+    """Schema for updating a product."""
+
+    name: Optional[str] = Field(default=None, description="New product name")
+    version: Optional[str] = Field(default=None, description="New product version")
+    description: Optional[str] = Field(default=None, description="New description")
+    ps_update_stream: Optional[str] = Field(default=None, description="New ps_update_stream")
+    ps_module: Optional[str] = Field(default=None, description="New ps_module")
+
+
+class TagUpdate(BaseModel):
+    """Schema for renaming a tag."""
+
+    name: str = Field(..., description="New tag name")
+
+
 # Scan schemas
 class ScanCreate(BaseModel):
     """Schema for creating a scan."""

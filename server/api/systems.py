@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ..auth import require_write
 from ..db import get_db, System, Scan, Package, File
 from .schemas import SystemCreate, SystemResponse
 
@@ -115,7 +116,7 @@ def get_system(hostname: str, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/", response_model=SystemResponse, status_code=201)
+@router.post("/", response_model=SystemResponse, status_code=201, dependencies=[Depends(require_write)])
 def create_system(system: SystemCreate, db: Session = Depends(get_db)):
     """Create a new system."""
     existing = db.query(System).filter(System.hostname == system.hostname).first()
@@ -150,7 +151,7 @@ def create_system(system: SystemCreate, db: Session = Depends(get_db)):
     )
 
 
-@router.put("/{hostname}", response_model=SystemResponse)
+@router.put("/{hostname}", response_model=SystemResponse, dependencies=[Depends(require_write)])
 def update_system(hostname: str, system: SystemCreate, db: Session = Depends(get_db)):
     """Update a system's metadata."""
     db_system = db.query(System).filter(System.hostname == hostname).first()
@@ -186,7 +187,7 @@ def update_system(hostname: str, system: SystemCreate, db: Session = Depends(get
     )
 
 
-@router.delete("/{hostname}", status_code=204)
+@router.delete("/{hostname}", status_code=204, dependencies=[Depends(require_write)])
 def delete_system(hostname: str, db: Session = Depends(get_db)):
     """Delete a system and all its scans."""
     system = db.query(System).filter(System.hostname == hostname).first()

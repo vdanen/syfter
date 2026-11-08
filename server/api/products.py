@@ -9,8 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
+from ..auth import require_write
 from ..db import get_db, Product, Scan, Package, File, ImageLayer, Attestation
-from .schemas import ProductCreate, ProductResponse
+from .schemas import ProductCreate, ProductResponse, ProductUpdate
 
 router = APIRouter()
 
@@ -131,7 +132,7 @@ def get_product(product_name: str, product_version: str, db: Session = Depends(g
     )
 
 
-@router.post("/", response_model=ProductResponse, status_code=201)
+@router.post("/", response_model=ProductResponse, status_code=201, dependencies=[Depends(require_write)])
 def create_product(product: ProductCreate, db: Session = Depends(get_db)):
     """Create a new product."""
     existing = (
@@ -252,7 +253,82 @@ def get_product_attestations(product_name: str, product_version: str, db: Sessio
     }
 
 
-@router.delete("/{product_name}/{product_version}", status_code=204)
+@router.patch("/{product_name}/{product_version}", dependencies=[Depends(require_write)])
+def update_product(
+    product_name: str,
+    product_version: str,
+    body: ProductUpdate,
+    db: Session = Depends(get_db),
+):
+    """Rename or update a product's metadata."""
+    product = (
+        db.query(Product)
+        .filter(Product.name == product_name, Product.version == product_version)
+        .first()
+    )
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    if body.name is not None:
+        existing = (
+            db.query(Product)
+            .filter(
+                Product.name == body.name,
+                Product.version == (body.version or product.version),
+                Product.id != product.id,
+            )
+            .first()
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail="A product with that name/version already exists")
+        product.name = body.name
+
+    if body.version is not None:
+        existing = (
+            db.query(Product)
+            .filter(
+                Product.name == (body.name or product.name),
+                Product.version == body.version,
+                Product.id != product.id,
+            )
+            .first()
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail="A product with that name/version already exists")
+        product.version = body.version
+
+    if body.description is not None:
+        product.description = body.description
+    if body.ps_update_stream is not None:
+        product.ps_update_stream = body.ps_update_stream
+    if body.ps_module is not None:
+        product.ps_module = body.ps_module
+
+    db.commit()
+    db.refresh(product)
+
+    scan_count = db.query(func.count(Scan.id)).filter(Scan.product_id == product.id).scalar() or 0
+    pkg_count = db.query(func.count(Package.id)).filter(Package.product_id == product.id).scalar() or 0
+
+    return {
+        "id": product.id,
+        "name": product.name,
+        "version": product.version,
+        "vendor": product.vendor,
+        "cpe_vendor": product.cpe_vendor,
+        "cpe_product": product.cpe_product,
+        "purl_namespace": product.purl_namespace,
+        "description": product.description,
+        "ps_update_stream": product.ps_update_stream,
+        "ps_module": product.ps_module,
+        "created_at": product.created_at,
+        "scan_count": scan_count,
+        "total_packages": pkg_count,
+        "total_files": 0,
+    }
+
+
+@router.delete("/{product_name}/{product_version}", status_code=204, dependencies=[Depends(require_write)])
 def delete_product(product_name: str, product_version: str, db: Session = Depends(get_db)):
     """Delete a product and all its scans, packages, and files."""
     product = (
@@ -265,11 +341,32 @@ def delete_product(product_name: str, product_version: str, db: Session = Depend
 
     product_id = product.id
 
-    # Delete in FK-safe order: dependencies -> files -> packages -> image_layers -> attestations -> scans -> product
+    # Clean up S3 objects (SBOMs + attestations) before deleting DB rows
+    from ..storage import get_storage
+    storage = get_storage()
+    scans = db.query(Scan).filter(Scan.product_id == product_id).all()
+    for scan in scans:
+        try:
+            storage.delete(scan.original_sbom_key)
+            storage.delete(scan.modified_sbom_key)
+        except Exception:
+            pass
+        for att in db.query(Attestation).filter(Attestation.scan_id == scan.id).all():
+            try:
+                storage.delete(att.attestation_key)
+            except Exception:
+                pass
+
+    # Delete in FK-safe order
     db.execute(text("DELETE FROM dependencies WHERE product_id = :product_id"), {"product_id": product_id})
     db.execute(text("DELETE FROM component_relationships WHERE parent_product_id = :product_id OR component_product_id = :product_id"), {"product_id": product_id})
     db.execute(text("DELETE FROM files WHERE product_id = :product_id"), {"product_id": product_id})
     db.execute(text("DELETE FROM packages WHERE product_id = :product_id"), {"product_id": product_id})
+    db.execute(text("""
+        DELETE FROM scan_tags WHERE scan_id IN (
+            SELECT id FROM scans WHERE product_id = :product_id
+        )
+    """), {"product_id": product_id})
     db.execute(text("""
         DELETE FROM image_layers WHERE scan_id IN (
             SELECT id FROM scans WHERE product_id = :product_id

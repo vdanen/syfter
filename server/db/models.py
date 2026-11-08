@@ -385,6 +385,7 @@ class ApiKey(Base):
     description: Mapped[Optional[str]] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    role: Mapped[str] = mapped_column(String(10), nullable=False, server_default="write")  # read, write, admin
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)

@@ -9,9 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ..auth import require_write
 from ..config import get_config
 from ..db import get_db, Tag, ScanTag, Scan
-from .schemas import TagCreate, TagResponse
+from .schemas import TagCreate, TagResponse, TagUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,30 @@ def list_tags(
     ]
 
 
-@router.delete("/{tag_id}", status_code=204)
+@router.patch("/{tag_id}", response_model=TagResponse, dependencies=[Depends(require_write)])
+def rename_tag(tag_id: int, body: TagUpdate, db: Session = Depends(get_db)):
+    """Rename a tag."""
+    tag = db.query(Tag).filter(Tag.id == tag_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Tag name cannot be empty")
+
+    existing = db.query(Tag).filter(Tag.name == new_name, Tag.id != tag_id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="A tag with that name already exists")
+
+    tag.name = new_name
+    db.commit()
+    db.refresh(tag)
+
+    scan_count = db.query(func.count(ScanTag.id)).filter(ScanTag.tag_id == tag.id).scalar() or 0
+    return TagResponse(id=tag.id, name=tag.name, created_at=tag.created_at, scan_count=scan_count)
+
+
+@router.delete("/{tag_id}", status_code=204, dependencies=[Depends(require_write)])
 def delete_tag(tag_id: int, db: Session = Depends(get_db)):
     """Delete a tag and all its scan associations."""
     tag = db.query(Tag).filter(Tag.id == tag_id).first()
