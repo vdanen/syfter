@@ -7,7 +7,7 @@ name = "syfter"
 version = "1.0.0"
 description = "Enterprise SBOM platform for RPM and container image scanning at scale"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 authors = [
     {name = "Vincent Danen", email = "vdanen@redhat.com"}
@@ -17,10 +17,10 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "click>=8.0",
@@ -46,6 +46,7 @@ dev = [
     "pytest-cov>=4.0",
     "black>=26.3.1",
     "ruff>=0.1",
+    "httpx2>=2.0; python_version >= '3.11'",
 ]
 all = [
     "syfter[server,dev]",
