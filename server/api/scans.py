@@ -1125,6 +1125,9 @@ async def import_packages(
         cursor.execute(f"DELETE FROM scans WHERE id = {param}", (existing_scan.id,))
         raw_conn.commit()
         db.expire_all()
+        # The row may be assigned the same primary key when the replacement
+        # scan is inserted (notably with SQLite). Remove the stale ORM identity.
+        db.expunge(existing_scan)
         logger.info("Existing scan deleted")
 
     # Store raw upload as the "original" for archival
