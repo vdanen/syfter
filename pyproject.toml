@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "syfter"
-version = "1.0.0"
+version = "0.9.2.0"
 description = "Enterprise SBOM platform for RPM and container image scanning at scale"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "Vincent Danen", email = "vdanen@redhat.com"}
+    {name = "Vincent Danen", email = "vdanen@redhat.com"},
+    {name = "Christopher Lusk"}
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
