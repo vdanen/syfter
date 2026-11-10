@@ -258,6 +258,58 @@ class TestCustomerIdPattern:
         assert len(results) == 2
 
 
+# ── Tag-based query after import ─────────────────────────────────────────
+
+
+class TestTagQueryAfterImport:
+
+    def test_import_with_tags_then_query_by_tag(self, api):
+        """Reproduce: import-packages with tags, then query packages by tag."""
+        packages = [
+            {"name": "requests", "version": "2.31.0", "purl": "pkg:pypi/requests@2.31.0"},
+        ]
+        upload_resp = api.post(
+            "/api/v1/scans/import-packages",
+            data={
+                "product_name": "CID-TEST",
+                "product_version": "2026-08-17",
+                "source_type": "package-list",
+                "tags": "CID-TEST,2026-08-17",
+            },
+            files={"packages": ("packages.json", json.dumps(packages).encode(), "application/json")},
+        )
+        assert upload_resp.status_code == 201
+        body = upload_resp.json()
+        assert body["package_count"] == 1
+        assert "CID-TEST" in body["tags"], f"Tags not saved: {body['tags']}"
+
+        query_resp = api.get("/api/v1/query/packages", params={"tag": "CID-TEST", "name": "%", "limit": 10})
+        assert query_resp.status_code == 200
+        results = query_resp.json()
+        assert len(results) == 1, f"Expected 1 package, got {len(results)}: {results}"
+        assert results[0]["name"] == "requests"
+
+    def test_import_with_multiple_tags_query_each(self, api):
+        """Verify both tags work for querying."""
+        packages = [{"name": "flask", "version": "3.0.0"}]
+        upload_resp = api.post(
+            "/api/v1/scans/import-packages",
+            data={
+                "product_name": "CID-MULTI",
+                "product_version": "latest",
+                "tags": "CID-MULTI,team-alpha",
+            },
+            files={"packages": ("p.json", json.dumps(packages).encode(), "application/json")},
+        )
+        assert upload_resp.status_code == 201
+        assert set(upload_resp.json()["tags"]) == {"CID-MULTI", "team-alpha"}
+
+        for tag_name in ["CID-MULTI", "team-alpha"]:
+            resp = api.get("/api/v1/query/packages", params={"tag": tag_name, "name": "%"})
+            assert resp.status_code == 200
+            assert len(resp.json()) == 1, f"Tag '{tag_name}' query returned {len(resp.json())} results"
+
+
 # ── CID tag enforcement ─────────────────────────────────────────────────
 
 
