@@ -212,7 +212,7 @@ BuildRequires:  python3-pip
 BuildRequires:  python3-setuptools
 BuildRequires:  python3-wheel
 
-Requires:       python3 >= 3.9
+Requires:       python3 >= 3.11
 Requires:       python3-click >= 8.0
 Requires:       python3-pyyaml >= 6.0
 Requires:       python3-rich >= 13.0
@@ -454,7 +454,7 @@ When preparing a new release:
 
 ### Minimum Requirements
 
-- Python 3.9+
+- Python 3.11+
 - 100MB disk space
 - Network access to Syfter server (for server mode)
 

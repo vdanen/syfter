@@ -7,34 +7,20 @@
 ![PyPI release](https://img.shields.io/pypi/s/syfter)
 ![Downloads](https://static.pepy.tech/badge/syfter)
 
-SBOM generation and management tool using [Syft](https://github.com/anchore/syft) designed for multi-team, large-scale SBOM management. Adds authentication, rate limiting, response caching, recursive SBOM extraction, dependency graph parsing, RPM dependency tracking, cross-product tracing, container attestation indexing, and query performance fixes for 20M+ package deployments.
+SBOM generation and management tool using [Syft](https://github.com/anchore/syft), designed for multi-team, large-scale SBOM management. Syfter provides authentication, rate limiting, response caching, recursive SBOM extraction, dependency graph parsing, RPM dependency tracking, cross-product tracing, container attestation indexing, and optimized queries for catalogs with more than 20 million packages.
 
-## What This Fork Adds
+## Features
 
-| Capability | Upstream | This Fork |
-|------------|----------|-----------|
-| **Authentication** | None | API key auth (SHA-256, DB-backed) + OIDC bearer token dual auth |
-| **Rate limiting** | None | Per-key token bucket (60/min queries, 10/min uploads) |
-| **Response caching** | None | In-process cache with auto-invalidation on mutations |
-| **SBOM import** | None | Auto-detect and import SPDX 2.x, CycloneDX 1.x, or syft-json SBOMs |
-| **Package-list import** | None | Import JSON arrays or CSV package lists without a full SBOM |
-| **Recursive SBOM extraction** | None | Flatten nested CycloneDX sub-components and SPDX CONTAINS relationships |
-| **Dependency graph parsing** | None | CycloneDX `dependencies` and SPDX `DEPENDS_ON` edges, auto-discovers transitive packages |
-| **RPM dependency tracking** | None | 504M requires/provides relationships, queryable by package or dependency name |
-| **Cross-product tracing** | None | `syfter trace` follows a package from RHEL repos through UBI base images into layered containers |
-| **VULCAN analysis** | None | CVE impact analysis with container layer deduplication and tracker recommendations |
-| **Scan tagging** | None | Tag scans for grouping by customer, product line, or team |
-| **CID tag enforcement** | None | Require `CID-` prefixed tags on upload (configurable) |
-| **Attestation indexing** | None | Cosign SLSA provenance and SPDX document attestation metadata |
-| **Component relationships** | None | Product-to-product composition mappings |
-| **Web dashboard** | None | Browser-based SBOM browsing and import |
-| **Products list** | N+1 COUNT queries | LATERAL join -- **16s to 0.4s** |
-| **Package search** | Full table scan + sort | Subquery-first with COLLATE "C" index -- **30s timeout to 0.2s** |
-| **Dependency search** | N/A | Composite index + PK sort -- **< 1s** across 504M rows |
-| **Stats endpoint** | 5x COUNT(*) on large tables | Materialized view -- **16s to 97ms** |
-| **Job queue** | Async with FK violations | Removed -- direct upload only |
+- **SBOM collection and import:** Scan local targets and containers, or import SPDX 2.x, CycloneDX 1.x, syft-json, and JSON or CSV package lists.
+- **SBOM enrichment:** Add product metadata, recursively extract nested components, parse dependency graphs, and index attestations.
+- **Package and dependency search:** Filter by product, ecosystem, tag, or dependency; inspect package frequency and trace components across products and container layers.
+- **VULCAN analysis:** Assess CVE impact across products and container layers, with tracker recommendations.
+- **Organization and access controls:** Group scans with tags, optionally enforce `CID-` tags, authenticate with API keys or OIDC, and manage role-based access.
+- **Operational controls:** Apply per-key rate limits, cache query responses, and record access logs.
+- **Web dashboard:** Browse products, packages, statistics, and SBOM imports in a browser.
+- **Scanning and relationship tools:** Scan containers, repository metadata, and SBOMer inventories; manage product-to-product component relationships.
 
-All upstream features (scanning, SBOM enrichment, export, container layer tracking) are preserved.
+The server is optimized for large catalogs. Representative production measurements include package searches completing in about 0.2 seconds, product listings in about 0.4 seconds, and statistics in under 100 milliseconds.
 
 ## Current Scale
 
@@ -100,7 +86,7 @@ If `syfter` is not found, ensure `~/.local/bin` is in your PATH:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-> **Note:** If you previously installed the upstream `syfter` from `vdanen/syfter` or PyPI, uninstall it first (`uv tool uninstall syfter` or `pip uninstall syfter`). This fork adds auth, tracing, and dependency commands that the upstream CLI does not have.
+> **Note:** Use Syfter 0.9.2.0 or newer to access the features described here. Check the installed version with `syfter --version`.
 
 ## Configure
 
@@ -237,7 +223,7 @@ All endpoints require API key authentication via `X-API-Key` header except `/hea
 
 ## Configuration
 
-All settings via environment variables (same as upstream, plus these):
+Additional server settings are configured through environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -279,33 +265,13 @@ CREATE INDEX idx_dep_package_type ON dependencies (package_id, dependency_type);
 
 ## Deployment
 
-This fork is designed for OpenShift/Kubernetes. The container image is built from `podman/Containerfile`.
+Syfter is designed for OpenShift/Kubernetes. The container image is built from `podman/Containerfile`.
 
 A typical deployment includes:
 - Syfter API (Deployment with oauth2-proxy sidecar for browser OIDC)
 - PostgreSQL (StatefulSet)
 - Keycloak (OIDC provider for browser access)
 - AWS S3 via IRSA (SBOM object storage)
-
-## Upstream PRs
-
-| PR | Description | Status |
-|----|-------------|--------|
-| #3 | Remote URL scanning | Merged |
-| #4 | Server-side remote scanning | Merged |
-| #5 | Gzip validation fix | Merged |
-| #6 | Jobs FK cleanup on scan replacement | Merged |
-| #7 | API key auth support in CLI | Merged |
-| #8 | Package version filter for queries | Merged |
-| #9 | CLI restructure, trace command, dependency tracking, OOM fix | Merged |
-| #17 | Dependency query PK sort fix | Closed |
-| #18 | README update and dependency query fix | Merged |
-| #22 | Develop branch install instructions | Merged |
-| #23 | Scanning infrastructure, SBOM import, frequency endpoint | Open |
-| #24 | Enterprise features: tags, VULCAN, dashboard, layers, auth | Merged |
-| #25 | Fix 9 CVEs in starlette and python-multipart | Open |
-| #26 | Tag support for SBOM import endpoint and CLI | Open |
-| #27 | Tags in import endpoint and package query response | Open |
 
 ## License
 
