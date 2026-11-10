@@ -33,7 +33,10 @@ const App = {
           handler(app, params);
         } catch (e) {
           if (e.message !== "__auth__") {
-            app.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+            const alert = document.createElement("div");
+            alert.className = "alert alert-error";
+            alert.textContent = e && e.message ? e.message : String(e);
+            app.replaceChildren(alert);
           }
         }
         return;
