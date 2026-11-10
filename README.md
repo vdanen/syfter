@@ -1,7 +1,3 @@
----
-feature: 00 Meta/03 Resources/03.02 Thumbnails/external/8bc820dd2f6e3a2f393b504ebb96a1a0.svg
-thumbnail: 00 Meta/03 Resources/03.02 Thumbnails/external/8bc820dd2f6e3a2f393b504ebb96a1a0.svg
----
 # Syfter
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11827/badge)](https://www.bestpractices.dev/projects/11827)
