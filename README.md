@@ -1,6 +1,13 @@
 # Syfter
 
-A fork of [syfter](https://github.com/vdanen/syfter) hardened for multi-team, large-scale SBOM management. Adds authentication, rate limiting, response caching, recursive SBOM extraction, dependency graph parsing, RPM dependency tracking, cross-product tracing, container attestation indexing, and query performance fixes for 20M+ package deployments.
+
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11827/badge)](https://www.bestpractices.dev/projects/11827)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vdanen/syfter/badge)](https://scorecard.dev/viewer/?uri=github.com/vdanen/syfter)
+![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/vdanen/syfter?sort=semver)
+![PyPI release](https://img.shields.io/pypi/s/syfter)
+![Downloads](https://static.pepy.tech/badge/syfter)
+
+SBOM generation and management tool using [Syft](https://github.com/anchore/syft) designed for multi-team, large-scale SBOM management. Adds authentication, rate limiting, response caching, recursive SBOM extraction, dependency graph parsing, RPM dependency tracking, cross-product tracing, container attestation indexing, and query performance fixes for 20M+ package deployments.
 
 ## What This Fork Adds
 
@@ -38,31 +45,48 @@ Tested in production with:
 - 1,038 cosign attestation records
 - All query endpoints < 2 seconds
 
-## Install the CLI
+## Installation
 
-### macOS
-
-```bash
-uv tool install "git+https://github.com/north-echo/syfter@develop"
-```
-
-Or with pip:
+### Using uv (recommended)
 
 ```bash
-pip install "git+https://github.com/north-echo/syfter@develop"
+# Install as a standalone CLI tool (isolated environment)
+uv tool install syfter
+
+# Or install with server components
+uv tool install "syfter[server]"
+
+# Upgrade to latest version
+uv tool upgrade syfter
 ```
 
-### Linux
+### Using pip
 
 ```bash
-pip install "git+https://github.com/north-echo/syfter@develop"
+# Install from PyPI
+pip install syfter
+
+# Install with server components
+pip install "syfter[server]"
 ```
 
-If you hit PEP 668 restrictions, use `pipx` or `uv`:
+### From Source
 
 ```bash
-pipx install "git+https://github.com/north-echo/syfter@develop"
+git clone https://github.com/vdanen/syfter.git
+cd syfter
+
+# Using uv
+uv tool install .
+
+# Or using pip
+pip install -e .
+
+# Install with all components (server + dev tools)
+pip install -e ".[all]"
 ```
+
+See [docs/BUILDING.md](docs/BUILDING.md) for detailed build and distribution options.
 
 ### Verify
 
@@ -285,8 +309,5 @@ A typical deployment includes:
 
 ## License
 
-Apache License 2.0 -- same as upstream syfter.
+Apache License 2.0
 
-## Credits
-
-Based on [syfter](https://github.com/vdanen/syfter) by Vincent Danen.

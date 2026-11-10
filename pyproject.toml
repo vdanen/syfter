@@ -58,8 +58,8 @@ syfter = "syfter.cli:main"
 syfter-server = "server.main:run_server"
 
 [project.urls]
-Homepage = "https://github.com/north-echo/syfter"
-Repository = "https://github.com/north-echo/syfter"
+Homepage = "https://github.com/vdanen/syfter"
+Repository = "https://github.com/vdanen/syfter"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -67,7 +67,7 @@ include = ["syfter*", "server*"]
 
 [tool.black]
 line-length = 100
-target-version = ["py39", "py310", "py311", "py312", "py313"]
+target-version = ["py311", "py312", "py313", "py314"]
 
 [tool.ruff]
 line-length = 100
