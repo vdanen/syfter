@@ -38,6 +38,8 @@ class Product(Base):
     cpe_product: Mapped[Optional[str]] = mapped_column(String(255))
     purl_namespace: Mapped[str] = mapped_column(String(100), default="redhat")
     description: Mapped[Optional[str]] = mapped_column(Text)
+    ps_update_stream: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    ps_module: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -109,6 +111,10 @@ class Scan(Base):
     original_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     modified_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Background dependency processing status
+    deps_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    deps_count: Mapped[int] = mapped_column(Integer, default=0)
+
     # Relationships
     product: Mapped[Optional["Product"]] = relationship(back_populates="scans")
     system: Mapped[Optional["System"]] = relationship(back_populates="scans")
@@ -116,6 +122,7 @@ class Scan(Base):
     dependencies: Mapped[List["Dependency"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
     image_layers: Mapped[List["ImageLayer"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
     attestations: Mapped[List["Attestation"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
+    scan_tags: Mapped[List["ScanTag"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_scan_product", "product_id"),
@@ -306,6 +313,66 @@ class ComponentRelationship(Base):
     )
 
 
+class VulcanAnalysis(Base):
+    """VULCAN CVE impact analysis with layer deduplication."""
+
+    __tablename__ = "vulcan_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    cve_id: Mapped[Optional[str]] = mapped_column(String(50))
+    component: Mapped[str] = mapped_column(String(500), nullable=False)
+    ps_module: Mapped[Optional[str]] = mapped_column(String(100))
+    impact: Mapped[Optional[str]] = mapped_column(String(20))
+    total_products: Mapped[int] = mapped_column(Integer, default=0)
+    rhel_repos: Mapped[int] = mapped_column(Integer, default=0)
+    base_images: Mapped[int] = mapped_column(Integer, default=0)
+    layered_containers: Mapped[int] = mapped_column(Integer, default=0)
+    app_layer_unique: Mapped[int] = mapped_column(Integer, default=0)
+    recommended_trackers: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="active")
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(100))
+
+    trackers: Mapped[List["VulcanTracker"]] = relationship(
+        back_populates="analysis", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("idx_va_cve", "cve_id"),
+        Index("idx_va_component", "component"),
+        Index("idx_va_status", "status"),
+    )
+
+
+class VulcanTracker(Base):
+    """Deduplicated tracker recommendation from a VULCAN analysis."""
+
+    __tablename__ = "vulcan_trackers"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    analysis_id: Mapped[int] = mapped_column(
+        ForeignKey("vulcan_analyses.id", ondelete="CASCADE"), nullable=False
+    )
+    tracker_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    product_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    covers_count: Mapped[int] = mapped_column(Integer, default=0)
+    covered_products_json: Mapped[Optional[str]] = mapped_column(Text)
+    package_version: Mapped[Optional[str]] = mapped_column(String(200))
+    package_arch: Mapped[Optional[str]] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(100))
+
+    analysis: Mapped["VulcanAnalysis"] = relationship(back_populates="trackers")
+
+    __table_args__ = (
+        Index("idx_vt_analysis", "analysis_id"),
+        Index("idx_vt_product", "product_name", "product_version"),
+    )
+
+
 class ApiKey(Base):
     """API key for authentication."""
 
@@ -318,6 +385,7 @@ class ApiKey(Base):
     description: Mapped[Optional[str]] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    role: Mapped[str] = mapped_column(String(10), nullable=False, server_default="write")  # read, write, admin
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
@@ -325,4 +393,57 @@ class ApiKey(Base):
     __table_args__ = (
         Index("idx_apikey_hash", "key_hash"),
         Index("idx_apikey_team", "team_name"),
+    )
+
+
+class Tag(Base):
+    """Tag for grouping scans (e.g., by customer, product line)."""
+
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    scan_tags: Mapped[List["ScanTag"]] = relationship(back_populates="tag", cascade="all, delete-orphan")
+
+
+class ScanTag(Base):
+    """Many-to-many join between scans and tags."""
+
+    __tablename__ = "scan_tags"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    scan: Mapped["Scan"] = relationship(back_populates="scan_tags")
+    tag: Mapped["Tag"] = relationship(back_populates="scan_tags")
+
+    __table_args__ = (
+        UniqueConstraint("scan_id", "tag_id", name="uq_scan_tag"),
+        Index("idx_scan_tags_scan_id", "scan_id"),
+        Index("idx_scan_tags_tag_id", "tag_id"),
+    )
+
+
+class AccessLog(Base):
+    """API access log for audit trail."""
+
+    __tablename__ = "access_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    method: Mapped[str] = mapped_column(String(10), nullable=False)
+    path: Mapped[str] = mapped_column(String(500), nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    response_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    key_prefix: Mapped[Optional[str]] = mapped_column(String(8))
+    team_name: Mapped[Optional[str]] = mapped_column(String(255))
+    client_ip: Mapped[Optional[str]] = mapped_column(String(45))
+
+    __table_args__ = (
+        Index("idx_access_log_timestamp", "timestamp"),
+        Index("idx_access_log_team", "team_name"),
     )

@@ -1,0 +1,2 @@
+parent_product,parent_version,component_product,component_version,relationship_type
+beta-layered-rhel9-openstack,x86_64,openstack-resource-controller-rhel9,4.19.0,layered

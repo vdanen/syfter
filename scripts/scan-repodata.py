@@ -21,7 +21,7 @@ Usage:
 
 Prerequisites:
     - SYFTER_SERVER set to the syfter API endpoint
-    - Network access to rhsm-pulp.corp.redhat.com
+    - Network access to your Pulp content mirror (set PULP_BASE_URL)
 """
 
 import argparse
@@ -42,9 +42,12 @@ from urllib.request import urlopen, Request
 
 import ssl
 
+from scanner_common import upload_to_syfter, load_progress, save_progress
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-PULP_BASE = os.environ.get("PULP_BASE_URL", "https://rhsm-pulp.corp.redhat.com")
+# Pulp RPM content mirror -- set PULP_BASE_URL to your mirror's base URL
+PULP_BASE = os.environ.get("PULP_BASE_URL", "https://pulp.example.com")
 CONTENT_URL = f"{PULP_BASE}/content"
 MAX_CRAWL_DEPTH = 15
 CRAWL_DELAY = 0.15
@@ -81,6 +84,7 @@ KNOWN_ARCHES = {
 NS = {
     "common": "http://linux.duke.edu/metadata/common",
     "rpm": "http://linux.duke.edu/metadata/rpm",
+    "fl": "http://linux.duke.edu/metadata/filelists",
 }
 
 
@@ -162,6 +166,105 @@ def record_timestamp(progress, key, packages_url):
     }
 
 
+# ─── Product-Definitions Filter ──────────────────────────────────────────────
+
+_VARIANT_RE = re.compile(r"^([A-Za-z]+)-(\d+\.\d+)")
+_COMPOSE_VARIANT_RE = re.compile(r"^([A-Za-z]+)$")
+_RHEL_MODULE_RE = re.compile(r"rhel-(\d+)")
+_RHEL_PRODUCT_RE = re.compile(r"^(?:aus|e4s|eus|tus|beta|beta-layered)?-?rhel-?(\d+)")
+
+
+def load_prod_defs(repo_path):
+    """Parse a product-definitions checkout and return the set of active
+    (rhel_major, minor_version, variant_lower) tuples.
+
+    For example, if rhel-9 module has active stream rhel-9.6.z with
+    errata_info variant "BaseOS-9.6.0.Z.EUS", this yields ("9", "9.6", "baseos").
+    """
+    data_dir = os.path.join(repo_path, "data")
+    if not os.path.isdir(data_dir):
+        sys.exit(f"Error: {data_dir} not found -- is this a product-definitions checkout?")
+
+    allowed = set()
+    module_count = 0
+
+    for dirpath, _dirnames, filenames in os.walk(data_dir):
+        for fname in filenames:
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                with open(fpath) as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            ps_modules = data.get("ps_modules", {})
+            ps_streams = data.get("ps_update_streams", {})
+
+            for mod_name, mod_data in ps_modules.items():
+                m = _RHEL_MODULE_RE.search(mod_name)
+                if not m:
+                    continue
+                rhel_major = m.group(1)
+
+                if mod_name.startswith("rhel-br-"):
+                    continue
+
+                active_streams = mod_data.get("active_ps_update_streams", [])
+                if not active_streams:
+                    continue
+                module_count += 1
+
+                for stream_name in active_streams:
+                    stream = ps_streams.get(stream_name, {})
+
+                    for ei in stream.get("errata_info", []):
+                        for pv in ei.get("product_versions", []):
+                            for variant in pv.get("variants", []):
+                                vm = _VARIANT_RE.match(variant)
+                                if vm:
+                                    variant_lower = vm.group(1).lower()
+                                    minor_ver = vm.group(2)
+                                    allowed.add((rhel_major, minor_ver, variant_lower))
+
+                    for compose in stream.get("composes", []):
+                        stream_ver_m = re.search(r"(\d+\.\d+)", stream_name)
+                        if not stream_ver_m:
+                            continue
+                        minor_ver = stream_ver_m.group(1)
+                        for variant in compose.get("variants", []):
+                            allowed.add((rhel_major, minor_ver, variant.lower()))
+
+    return allowed, module_count
+
+
+def matches_prod_defs(product, version, allowed):
+    """Check if a discovered repo matches any active product-definitions stream.
+
+    Non-RHEL products (no rhelN in name) pass through unconditionally.
+    """
+    m = _RHEL_PRODUCT_RE.search(product)
+    if not m:
+        return True
+    rhel_major = m.group(1)
+
+    parts = product.split("-")
+    rhel_idx = next(
+        (i for i, p in enumerate(parts) if re.match(rf"^rhel{rhel_major}$", p)), None
+    )
+    if rhel_idx is None or rhel_idx + 1 >= len(parts):
+        return True
+    variant = "-".join(parts[rhel_idx + 1:]).lower()
+
+    ver_m = re.match(r"(\d+\.\d+)", version)
+    if not ver_m:
+        return True
+    minor_ver = ver_m.group(1)
+
+    return (rhel_major, minor_ver, variant) in allowed
+
+
 # ─── Repo Discovery ──────────────────────────────────────────────────────────
 
 def discover_repos(base_url, rel_path="", depth=0):
@@ -183,6 +286,27 @@ def discover_repos(base_url, rel_path="", depth=0):
             continue
         sub = f"{rel_path}/{d}".lstrip("/")
         yield from discover_repos(base_url, sub, depth + 1)
+
+
+def _dedup_versions(versions):
+    """Remove redundant major versions when a more specific minor exists.
+
+    e.g. ["7", "7.6"] -> ["7.6"], ["5", "5Server"] -> ["5Server"]
+    but ["8.2", "6.10"] stays as-is (different major = different products).
+    """
+    if len(versions) < 2:
+        return versions
+    keep = []
+    skip = set()
+    for i, v in enumerate(versions):
+        for j, other in enumerate(versions):
+            if i != j and other.startswith(v + ".") or other.startswith(v.rstrip(".") + "S"):
+                skip.add(i)
+                break
+    for i, v in enumerate(versions):
+        if i not in skip:
+            keep.append(v)
+    return keep or versions
 
 
 def path_to_scan_info(tree, repo_path):
@@ -207,36 +331,77 @@ def path_to_scan_info(tree, repo_path):
         if not deduped or n != deduped[-1]:
             deduped.append(n)
     names = deduped
+    versions = _dedup_versions(versions)
     product = "-".join(names) if names else tree.replace("/", "-")
     version = ("-".join(versions) + "-" + arch) if versions else arch
     description = " ".join([p for p in raw.split("/") if p not in ("os", "Packages")])
     return product, version, description
 
 
+# ─── CPE Generation ──────────────────────────────────────────────────────────
+
+def normalize_vendor(vendor):
+    if not vendor:
+        return "redhat"
+    v = vendor.lower()
+    if "red hat" in v:
+        return "redhat"
+    for suffix in [", inc.", ", inc", " inc.", " inc", ", ltd.", " ltd"]:
+        v = v.replace(suffix, "")
+    return re.sub(r'[^a-z0-9]+', '_', v).strip('_') or "redhat"
+
+
+def generate_cpes(name, raw_version, release, vendor):
+    v = normalize_vendor(vendor)
+    n = re.sub(r'[^a-z0-9._-]', lambda m: '\\' + m.group(), name.lower())
+    cpes = [
+        f"cpe:2.3:a:{v}:{n}:{raw_version}:{release}:*:*:*:*:*:*",
+    ]
+    return cpes
+
+
 # ─── Repodata Parsing ─────────────────────────────────────────────────────────
 
-def find_primary_xml_url(repo_url):
-    """Find the primary.xml.gz URL from a repo's repodata/ directory."""
+def find_repodata_urls(repo_url):
+    """Find primary.xml.gz and filelists.xml.gz URLs from repodata/."""
     repodata_url = repo_url.rstrip("/") + "/repodata/"
     try:
         with urlopen(repodata_url, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
     except Exception:
-        return None
+        return None, None
 
-    # Find all primary.xml.gz files, pick the latest (alphabetically last)
     primaries = re.findall(r'href="([^"]*primary\.xml\.gz)"', html)
-    if not primaries:
-        return None
-    return repodata_url + sorted(primaries)[-1]
+    filelists = re.findall(r'href="([^"]*filelists\.xml\.gz)"', html)
+
+    primary_url = (repodata_url + sorted(primaries)[-1]) if primaries else None
+    filelists_url = (repodata_url + sorted(filelists)[-1]) if filelists else None
+    return primary_url, filelists_url
 
 
-def download_primary_xml(url):
-    """Download and decompress primary.xml.gz, return parsed XML root."""
-    with urlopen(url, timeout=60) as resp:
+def download_repodata_xml(url):
+    """Download and decompress a repodata .xml.gz, return parsed XML root."""
+    with urlopen(url, timeout=120) as resp:
         compressed = resp.read()
     xml_data = gzip.decompress(compressed)
     return ET.fromstring(xml_data), len(compressed)
+
+
+def parse_filelists(root):
+    """Parse filelists.xml, return dict of pkgid -> list of file paths."""
+    files_by_pkgid = {}
+    for pkg_elem in root.findall("fl:package", NS):
+        pkgid = pkg_elem.get("pkgid", "")
+        if not pkgid:
+            continue
+        files = []
+        for file_elem in pkg_elem.findall("fl:file", NS):
+            path = file_elem.text
+            if path:
+                files.append(path)
+        if files:
+            files_by_pkgid[pkgid] = files
+    return files_by_pkgid
 
 
 def parse_packages_from_primary(root):
@@ -286,19 +451,55 @@ def parse_packages_from_primary(root):
         license_val = ""
         source_rpm = ""
         vendor = ""
+        requires = []
+        provides = []
         if format_elem is not None:
             license_val = format_elem.findtext("rpm:license", "", NS)
             source_rpm = format_elem.findtext("rpm:sourcerpm", "", NS)
             vendor = format_elem.findtext("rpm:vendor", "", NS)
+
+            req_elem = format_elem.find("rpm:requires", NS)
+            if req_elem is not None:
+                for entry in req_elem.findall("rpm:entry", NS):
+                    req = {"name": entry.get("name", "")}
+                    flags = entry.get("flags")
+                    if flags:
+                        req["flags"] = flags
+                        ver = entry.get("ver", "")
+                        rel = entry.get("rel", "")
+                        req["version"] = f"{ver}-{rel}" if rel else ver
+                    else:
+                        req["flags"] = None
+                        req["version"] = None
+                    requires.append(req)
+
+            prov_elem = format_elem.find("rpm:provides", NS)
+            if prov_elem is not None:
+                for entry in prov_elem.findall("rpm:entry", NS):
+                    prov = {"name": entry.get("name", "")}
+                    flags = entry.get("flags")
+                    if flags:
+                        prov["flags"] = flags
+                        ver = entry.get("ver", "")
+                        rel = entry.get("rel", "")
+                        prov["version"] = f"{ver}-{rel}" if rel else ver
+                    else:
+                        prov["flags"] = None
+                        prov["version"] = None
+                    provides.append(prov)
 
         # Build PURL
         purl = f"pkg:rpm/redhat/{name}@{version}-{release}?arch={arch}"
         if epoch and epoch != "0":
             purl += f"&epoch={epoch}"
 
+        cpes = generate_cpes(name, version, release, vendor or packager)
+
         packages.append({
             "name": name,
             "version": f"{version}-{release}",
+            "raw_version": version,
+            "release": release,
             "epoch": epoch,
             "arch": arch,
             "summary": summary,
@@ -315,6 +516,9 @@ def parse_packages_from_primary(root):
             "location": location,
             "build_time": build_time,
             "purl": purl,
+            "cpes": cpes,
+            "requires": requires,
+            "provides": provides,
         })
     return packages
 
@@ -324,8 +528,8 @@ def parse_packages_from_primary(root):
 def build_syft_sbom(packages, source_path, source_name="", source_version=""):
     """Build a syft-json compatible SBOM from parsed package metadata."""
     artifacts = []
+    all_files = []
     for i, pkg in enumerate(packages):
-        # Build license list in syft format
         licenses = []
         if pkg.get("license"):
             licenses = [{"value": pkg["license"], "type": "declared"}]
@@ -339,14 +543,14 @@ def build_syft_sbom(packages, source_path, source_name="", source_version=""):
             "locations": [{"path": pkg["location"]}],
             "licenses": licenses,
             "language": "",
-            "cpes": [],
+            "cpes": pkg.get("cpes", []),
             "purl": pkg["purl"],
             "metadata": {
                 "name": pkg["name"],
                 "version": pkg["version"],
                 "epoch": int(pkg["epoch"]) if pkg["epoch"] else None,
                 "architecture": pkg["arch"],
-                "release": pkg["version"].split("-")[-1] if "-" in pkg["version"] else "",
+                "release": pkg.get("release", ""),
                 "sourceRpm": pkg.get("source_rpm", ""),
                 "size": pkg["installed_size"],
                 "vendor": pkg.get("vendor", "Red Hat, Inc."),
@@ -356,10 +560,18 @@ def build_syft_sbom(packages, source_path, source_name="", source_version=""):
         }
         artifacts.append(artifact)
 
+        for fpath in pkg.get("files", []):
+            all_files.append({
+                "id": str(uuid.uuid4()),
+                "location": {"path": fpath},
+                "metadata": {"type": "RegularFile"},
+                "digests": [],
+            })
+
     sbom = {
         "artifacts": artifacts,
         "artifactRelationships": [],
-        "files": [],
+        "files": all_files,
         "source": {
             "id": str(uuid.uuid4()),
             "name": source_name or source_path,
@@ -393,11 +605,11 @@ def build_packages_index(packages):
         entry = {
             "name": pkg["name"],
             "version": pkg["version"],
-            "release": pkg["version"].split("-")[-1] if "-" in pkg["version"] else "",
+            "release": pkg.get("release", ""),
             "arch": pkg["arch"],
             "type": "rpm",
             "purl": pkg["purl"],
-            "cpes": [],
+            "cpes": pkg.get("cpes", []),
             "license": pkg.get("license", ""),
             "source_rpm": pkg.get("source_rpm", ""),
             "epoch": int(pkg["epoch"]) if pkg["epoch"] else None,
@@ -412,118 +624,91 @@ def build_packages_index(packages):
     return index
 
 
-# ─── Upload ───────────────────────────────────────────────────────────────────
+def build_dependencies_index(packages):
+    """Build the dependencies_json index for upload to syfter."""
+    deps = []
+    for pkg in packages:
+        pkg_name = pkg["name"]
+        pkg_version = pkg["version"]
+        pkg_arch = pkg["arch"]
 
-def upload_to_syfter(server_url, product, version, source_path,
-                     original_sbom, packages_index):
-    """Upload a scan to the syfter server using curl."""
-    import subprocess
-    import tempfile
-    from urllib.parse import urlparse
+        for req in pkg.get("requires", []):
+            deps.append({
+                "package_name": pkg_name,
+                "package_version": pkg_version,
+                "package_arch": pkg_arch,
+                "dependency_name": req["name"],
+                "dependency_version": req.get("version"),
+                "dependency_flags": req.get("flags"),
+                "dependency_type": "requires",
+            })
 
-    original_gz = gzip.compress(json.dumps(original_sbom).encode())
-    modified_gz = gzip.compress(json.dumps(original_sbom).encode())  # Same for repodata scans
-    packages_gz = gzip.compress(json.dumps(packages_index).encode())
+        for prov in pkg.get("provides", []):
+            deps.append({
+                "package_name": pkg_name,
+                "package_version": pkg_version,
+                "package_arch": pkg_arch,
+                "dependency_name": prov["name"],
+                "dependency_version": prov.get("version"),
+                "dependency_flags": prov.get("flags"),
+                "dependency_type": "provides",
+            })
 
-    parsed = urlparse(server_url)
-    clean_url = f"{parsed.scheme}://{parsed.hostname}"
-    if parsed.port:
-        clean_url += f":{parsed.port}"
-    url = f"{clean_url}/api/v1/scans/upload"
-
-    # Write gzip data to temp files
-    tmp_files = []
-    try:
-        for data in (original_gz, modified_gz, packages_gz):
-            f = tempfile.NamedTemporaryFile(suffix=".gz", delete=False)
-            f.write(data)
-            f.close()
-            tmp_files.append(f.name)
-
-        cmd = [
-            "curl", "-sk", url,
-            "-F", f"product_name={product}",
-            "-F", f"product_version={version}",
-            "-F", f"source_path={source_path}",
-            "-F", "source_type=directory",
-            "-F", "syft_version=repodata-scanner-1.0",
-            "-F", f"original_sbom=@{tmp_files[0]};type=application/gzip",
-            "-F", f"modified_sbom=@{tmp_files[1]};type=application/gzip",
-            "-F", f"packages_json=@{tmp_files[2]};type=application/gzip",
-        ]
-
-        api_key = os.environ.get("SYFTER_API_KEY")
-        if api_key:
-            cmd.extend(["-H", f"X-API-Key: {api_key}"])
-        elif parsed.username:
-            cmd.extend(["-u", f"{parsed.username}:{parsed.password or ''}"])
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            raise RuntimeError(f"curl failed: {result.stderr}")
-
-        resp_data = json.loads(result.stdout)
-        return resp_data
-    finally:
-        for path in tmp_files:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+    return deps
 
 
 # ─── Scanning ─────────────────────────────────────────────────────────────────
 
-def scan_repo(repo_url, packages_url, product, version, description, server_url):
+def scan_repo(repo_url, packages_url, product, version, description, server_url,
+              include_files=False, max_files=100000, include_deps=True):
     """Scan a single repo via repodata. Returns (status, package_count, message)."""
-    # Find primary.xml.gz
-    primary_url = find_primary_xml_url(repo_url)
+    primary_url, filelists_url = find_repodata_urls(repo_url)
     if not primary_url:
         return "skipped", 0, "No repodata/primary.xml.gz found"
 
-    # Download and parse
     try:
-        root, dl_size = download_primary_xml(primary_url)
+        root, dl_size = download_repodata_xml(primary_url)
     except Exception as e:
         return "failed", 0, f"Failed to download primary.xml: {e}"
 
-    # Parse packages
     packages = parse_packages_from_primary(root)
     if not packages:
         return "skipped", 0, "No non-debug packages in repodata"
 
-    # Build the full SBOM with all packages
+    file_count = 0
+    if include_files and filelists_url:
+        try:
+            fl_root, fl_size = download_repodata_xml(filelists_url)
+            dl_size += fl_size
+            files_by_pkgid = parse_filelists(fl_root)
+            del fl_root
+
+            total_files = sum(len(f) for f in files_by_pkgid.values())
+            if total_files <= max_files:
+                for pkg in packages:
+                    pkg_files = files_by_pkgid.get(pkg["checksum"], [])
+                    pkg["files"] = pkg_files
+                    file_count += len(pkg_files)
+            else:
+                logging.info(f"  Skipping files ({total_files} > {max_files} threshold)")
+        except Exception as e:
+            logging.warning(f"  Filelists parse failed (continuing without): {e}")
+
     full_sbom = build_syft_sbom(packages, packages_url, product, version)
     packages_index = build_packages_index(packages)
+    dependencies_index = build_dependencies_index(packages) if include_deps else None
 
-    # Upload
     try:
         result = upload_to_syfter(server_url, product, version, packages_url,
-                                  full_sbom, packages_index)
-        return "completed", len(packages), f"Uploaded ({dl_size/1024:.0f}KB repodata, {len(packages)} pkgs)"
+                                  full_sbom, packages_index, dependencies_index)
+        parts = [f"{dl_size/1024:.0f}KB repodata", f"{len(packages)} pkgs"]
+        if dependencies_index:
+            parts.append(f"{len(dependencies_index)} deps")
+        if file_count:
+            parts.append(f"{file_count} files")
+        return "completed", len(packages), f"Uploaded ({', '.join(parts)})"
     except Exception as e:
         return "failed", 0, f"Upload failed: {e}"
-
-
-# ─── Progress Tracking ────────────────────────────────────────────────────────
-
-def load_progress():
-    if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE) as f:
-            data = json.load(f)
-        data.setdefault("completed", [])
-        data.setdefault("failed", [])
-        data.setdefault("skipped", [])
-        data.setdefault("timestamps", {})
-        return data
-    return {"completed": [], "failed": [], "skipped": [], "timestamps": {}}
-
-
-def save_progress(progress):
-    tmp = PROGRESS_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(progress, f, indent=2)
-    os.replace(tmp, PROGRESS_FILE)
 
 
 # ─── Connectivity ─────────────────────────────────────────────────────────────
@@ -536,7 +721,7 @@ def check_pulp_reachable():
                 resp.read(100)
             return
         except Exception:
-            logging.warning("  rhsm-pulp unreachable — retrying in 30s...")
+            logging.warning("  Pulp mirror unreachable -- retrying in 30s...")
             time.sleep(30)
 
 
@@ -551,13 +736,31 @@ def main():
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--retry-failed", action="store_true")
     ap.add_argument("--reset", action="store_true")
-    ap.add_argument("--workers", type=int, default=4,
-                    help="Number of parallel workers (default: 4)")
+    ap.add_argument("--workers", type=int, default=2,
+                    help="Number of parallel workers (default: 2)")
+    ap.add_argument("--include-files", action="store_true",
+                    help="Parse filelists.xml.gz for file-level inventory")
+    ap.add_argument("--max-files", type=int, default=100000,
+                    help="Skip file data when repo exceeds this count (default: 100000)")
+    ap.add_argument("--no-deps", action="store_true",
+                    help="Skip dependency extraction (requires/provides)")
+    ap.add_argument("--prod-defs", metavar="PATH",
+                    help="Path to product-definitions checkout; only scan repos "
+                         "matching active ps_update_streams")
+    ap.add_argument("--prod-defs-report", action="store_true",
+                    help="With --discover-only, show which repos pass the filter")
     args = ap.parse_args()
 
     server_url = os.environ.get("SYFTER_SERVER")
     if not server_url and not args.discover_only:
         sys.exit("Error: SYFTER_SERVER not set")
+
+    prod_defs_filter = None
+    if args.prod_defs:
+        prod_defs_filter, mod_count = load_prod_defs(args.prod_defs)
+        print(f"Product-definitions filter active: "
+              f"{len(prod_defs_filter)} active stream/variant combos "
+              f"from {mod_count} modules")
 
     # Logging
     log_fmt = logging.Formatter("%(asctime)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -573,12 +776,12 @@ def main():
 
     if args.reset and os.path.exists(PROGRESS_FILE):
         os.remove(PROGRESS_FILE)
-    progress = load_progress()
+    progress = load_progress(PROGRESS_FILE)
 
     if args.retry_failed and progress["failed"]:
         logging.info(f"Retrying {len(progress['failed'])} previously failed repos")
         progress["failed"] = []
-        save_progress(progress)
+        save_progress(progress, PROGRESS_FILE)
 
     trees = args.trees or DEFAULT_TREES
 
@@ -587,19 +790,31 @@ def main():
     all_repos = []
     logging.info(f"Discovering repos across {len(trees)} content trees...")
 
+    filtered_count = 0
     for tree in trees:
         tree_url = f"{CONTENT_URL}/{tree}"
         logging.info(f"  {tree} ...")
         count = 0
+        tree_filtered = 0
         for packages_url, repo_url, repo_path in discover_repos(tree_url):
             product, version, desc = path_to_scan_info(tree, repo_path)
             key = f"{product}:{version}"
+            if prod_defs_filter is not None and not matches_prod_defs(product, version, prod_defs_filter):
+                tree_filtered += 1
+                continue
             all_repos.append((packages_url, repo_url, product, version, desc, key))
             count += 1
+        parts = []
         if count:
-            logging.info(f"    → {count} repos")
+            parts.append(f"{count} repos")
+        if tree_filtered:
+            parts.append(f"{tree_filtered} filtered out by prod-defs")
+            filtered_count += tree_filtered
+        if parts:
+            logging.info(f"    -> {', '.join(parts)}")
 
-    logging.info(f"\nDiscovered {len(all_repos)} total repos\n")
+    filter_msg = f" ({filtered_count} filtered by prod-defs)" if filtered_count else ""
+    logging.info(f"\nDiscovered {len(all_repos)} repos to scan{filter_msg}\n")
 
     # ── Discover-only ──
     if args.discover_only:
@@ -615,11 +830,22 @@ def main():
                 tag = "FAIL"
             else:
                 tag = "TODO"
-            print(f"[{tag}] {product}  {version}  —  {desc}")
+            print(f"[{tag}] {product}  {version}  --  {desc}")
         todo = sum(1 for *_, k in all_repos
                    if k not in completed and k not in skipped and k not in failed)
         print(f"\n{len(all_repos)} total | {len(completed)} done | "
               f"{len(skipped)} skipped | {len(failed)} failed | {todo} new")
+        if filtered_count:
+            print(f"{filtered_count} repos excluded by product-definitions filter")
+        if args.prod_defs_report and prod_defs_filter is not None:
+            print(f"\n--- Product-definitions active streams ---")
+            by_major = {}
+            for rhel_major, minor_ver, variant in sorted(prod_defs_filter):
+                by_major.setdefault(f"rhel-{rhel_major}", set()).add(
+                    f"{minor_ver}/{variant}"
+                )
+            for mod, entries in sorted(by_major.items()):
+                print(f"  {mod}: {', '.join(sorted(entries))}")
         return
 
     # ── Build scan queue ──
@@ -671,7 +897,10 @@ def main():
         for attempt in range(1, SCAN_RETRIES + 1):
             try:
                 status, pkg_count, msg = scan_repo(
-                    repo_url, url, product, version, desc, server_url
+                    repo_url, url, product, version, desc, server_url,
+                    include_files=args.include_files,
+                    max_files=args.max_files,
+                    include_deps=not args.no_deps,
                 )
                 return key, url, product, version, desc, status, pkg_count, msg
             except Exception as e:
@@ -710,8 +939,11 @@ def main():
                 new_skipped += 1
             else:
                 new_failed += 1
-            save_progress(progress)
+            save_progress(progress, PROGRESS_FILE)
             scanned_count += 1
+            # Throttle uploads to avoid overwhelming the API server
+            if status == "completed":
+                time.sleep(2)
     else:
         # Parallel mode
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -744,7 +976,7 @@ def main():
                     new_skipped += 1
                 else:
                     new_failed += 1
-                save_progress(progress)
+                save_progress(progress, PROGRESS_FILE)
                 scanned_count += 1
 
                 if scanned_count % 50 == 0:

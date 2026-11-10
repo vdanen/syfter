@@ -1,0 +1,39 @@
+Tree,Product,Versions,Arches,Repos/Channels,Repo Count
+dist/rhel8,RHEL 8,"8.0, 8.1, 8.1-original, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8, 8.9, 8.10, 8","x86_64, aarch64, ppc64le, s390x","appstream, baseos, codeready-builder, dirsrv, highavailability, nfv, resilientstorage, rt, sap, sap-solutions, supplementary",359
+dist/rhel9,RHEL 9,"9.0, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 9.8, 9.9, 9","x86_64, aarch64, ppc64le, s390x","appstream, baseos, codeready-builder, dirsrv, highavailability, nfv, resilientstorage, rt, sap, sap-solutions, supplementary",290
+dist/rhel10,RHEL 10,"10.0, 10.1, 10.2, 10.3, 10","x86_64, aarch64, ppc64le, s390x","appstream, baseos, codeready-builder, dirsrv, extensions, highavailability, nfv, rt, sap, sap-solutions, supplementary",99
+dist/rhel,RHEL 5/6/7,"5.x, 6.x, 7.x","x86_64, i386, ia64, ppc64le, s390x, arm-64, power, system-z","server, client, workstation, computenode, container, desktop, atomic",246
+dist/rhel-alt,RHEL Alt 7,7,"aarch64, power-9, system-z",server,3
+dist/layered,OpenShift (rhocp),"4.12, 4.13, 4.14, 4.15, 4.16, 4.17, 4.18, 4.19, 4.20, 4.21","x86_64, aarch64, ppc64le, s390x","rhocp, ocp-tools, openshift-builds",—
+dist/layered,Ansible Automation Platform,"2.2, 2.3, 2.4, 2.5, 2.6","x86_64, aarch64, ppc64le, s390x","ansible-automation-platform, ansible-developer, ansible-inside, ansible",—
+dist/layered,Satellite,6.x,"x86_64, aarch64, ppc64le, s390x","satellite, sat-capsule, sat-client, sat-client-2, sat-maintenance, sat-utils",—
+dist/layered,Ceph Storage,various,"x86_64, aarch64, ppc64le, s390x","rhceph-mon, rhceph-osd, rhceph-tools",—
+dist/layered,OpenStack,various,"x86_64, aarch64, ppc64le, s390x","openstack, openstack-tools, openstack-cinderlib, openstack-stf, rhoso, rhoso-edpm, rhoso-podified",—
+dist/layered,RHACM,various,"x86_64, aarch64, ppc64le, s390x","rhacm, rhacm-textonly, multicluster-engine-textonly",—
+dist/layered,CNV / Virtualization,various,"x86_64, aarch64","cnv, mtv",—
+dist/layered,GitOps / Pipelines,various,"x86_64, aarch64, ppc64le, s390x","gitops, pipelines",—
+dist/layered,Service Mesh,various,"x86_64, aarch64, ppc64le, s390x","ossm, network-observability",—
+dist/layered,OpenShift Data Foundation,various,"x86_64, aarch64, ppc64le, s390x","rhodf, lvms",—
+dist/layered,RHEL AI,various,"x86_64, aarch64","rhelai, rhelai-cuda, rhelai-gaudi",—
+dist/layered,Quay,various,"x86_64, aarch64, ppc64le, s390x",quay,—
+dist/layered,Developer Hub,various,"x86_64, aarch64",rhdh,—
+dist/layered,AMQ Messaging,various,x86_64,"amq, amq-streams",—
+dist/layered,SSO / Keycloak,various,x86_64,rh-sso,—
+dist/layered,Quarkus,various,x86_64,quarkus,—
+dist/layered,"Other (cert-manager, discovery, edge-manager, fast-datapath, rhsi, rhui, rhwa, rosa, rodoo, rhai, rhem, kdo, kmm, oadp)",various,various,various,—
+dist/layered,Layered Subtotal,,,, 929
+dist/rhivos1,RHIVOS 1,"1.0, 1.1, 1, 1.0-core, 1.1-core, 1-core","x86_64, aarch64",single repo per version/arch,12
+dist/rhivos2,RHIVOS 2,"2.0, 2.1","x86_64, aarch64",not populated yet,0
+dist/rhs,Red Hat Storage,various,x86_64,storage,4
+dist/cf-me,CloudForms,various,x86_64,management engine,9
+dist/rhes + suse,RH Enterprise Server + SUSE,legacy,various,legacy,12
+aus,Advanced Update Support (RHEL 8/9),various minor,"x86_64, aarch64, ppc64le, s390x","baseos, appstream, etc.",52
+e4s,Extended for SAP (RHEL 8/9),various minor,"x86_64, aarch64, ppc64le, s390x","baseos, appstream, sap, sap-solutions, highavailability, etc.",271
+e6s,Extended 6-stream,various,various,,1
+els,Extended Lifecycle Support (RHEL 8),various minor,"x86_64, aarch64, ppc64le, s390x","baseos, appstream, etc.",29
+eus,Extended Update Support (RHEL 8/9),various minor,"x86_64, aarch64, ppc64le, s390x","baseos, appstream, codeready-builder, supplementary, etc.",550
+extended-eus,Extended EUS,various,various,,21
+tus,Telecom Update Support (RHEL 8/9),various minor,x86_64,"baseos, appstream, etc.",46
+beta,Beta / Pre-release,various,various,pre-release repos,67
+public,UBI + Public Content,"UBI 8, 9, 10","x86_64, aarch64, ppc64le, s390x","baseos, appstream, codeready-builder",244
+,,,,GRAND TOTAL,"3,244"

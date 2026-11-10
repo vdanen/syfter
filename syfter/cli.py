@@ -657,6 +657,111 @@ def _query_server(ctx, name, pkg_version, file_path, digest, product, product_ve
         sys.exit(1)
 
 
+@main.command("frequency")
+@click.option("-n", "--name", required=True, help="Package name (exact match or %% wildcard)")
+@click.option("-p", "--product", help="Filter by product name (%% wildcard)")
+@click.option("-v", "--version", "product_version", help="Filter by product version (%% wildcard)")
+@click.option("--limit", type=int, default=100, help="Maximum versions to return")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def frequency(ctx, name, product, product_version, limit, output_json):
+    """Show version frequency for a package across SBOMs.
+
+    Counts how many SBOMs contain each version of a package, sorted by
+    frequency. Useful for identifying the most common versions in use.
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: frequency requires server mode[/red]")
+        sys.exit(1)
+
+    from .client import SyfterClient, APIError
+    import httpx
+
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            results = client.package_frequency(
+                name=name, product_name=product,
+                product_version=product_version, limit=limit,
+            )
+            if output_json:
+                click.echo(json.dumps(results, indent=2))
+                return
+            if not results:
+                console.print("[yellow]No packages found[/yellow]")
+                return
+            table = Table(title=f"Version Frequency: {name}", box=box.SIMPLE)
+            table.add_column("Version", style="cyan")
+            table.add_column("SBOMs", style="green", justify="right")
+            table.add_column("Products", style="magenta")
+            for row in results:
+                products_str = ", ".join(row["products"][:5])
+                if len(row["products"]) > 5:
+                    products_str += f" (+{len(row['products']) - 5} more)"
+                table.add_row(
+                    row["version"] or "(empty)",
+                    str(row["sbom_count"]),
+                    products_str,
+                )
+            console.print(table)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Frequency query failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("import")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("-p", "--product", required=True, help="Product name")
+@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("--description", help="Description for this SBOM")
+@click.option("--source-type", default="sbom", help="Source type (default: sbom)")
+@click.option("--tag", "tags", multiple=True, help="Tag to apply (repeatable)")
+@click.option("--json", "output_json", is_flag=True, help="Output response as JSON")
+@click.pass_context
+def import_sbom(ctx, file_path, product, product_version, description, source_type, tags, output_json):
+    """Import an SBOM file (SPDX, CycloneDX, or syft-json).
+
+    Auto-detects format and indexes all packages. The original SBOM is
+    stored as-is in object storage.
+
+    Example: syfter import customer-sbom.spdx.json -p acme-app -v 2.1
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: import requires server mode[/red]")
+        sys.exit(1)
+
+    from .client import SyfterClient, APIError
+    import httpx
+
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            result = client.import_sbom(
+                file_path=file_path,
+                product_name=product,
+                product_version=product_version,
+                source_type=source_type,
+                description=description,
+                tags=list(tags) if tags else None,
+            )
+            if output_json:
+                click.echo(json.dumps(result, indent=2))
+                return
+            console.print(f"[green]Imported {result['package_count']} packages[/green]")
+            console.print(f"  Format:  {result['sbom_format']}")
+            console.print(f"  Product: {result['product_name']}-{result['product_version']}")
+            console.print(f"  Scan ID: {result['id']}")
+            if result.get("tags"):
+                console.print(f"  Tags:    {', '.join(result['tags'])}")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Import failed: {e}[/red]")
+        sys.exit(1)
+
+
 def _get_format_extension(output_format: str) -> str:
     """Get the file extension for a given format."""
     extensions = {
@@ -796,8 +901,9 @@ def _format_source_type(source_type: str) -> str:
 
 
 @main.command("products")
+@click.option("--filter", "-f", "name_filter", default=None, help="Filter by product name (case-insensitive substring match)")
 @click.pass_context
-def list_products(ctx):
+def list_products(ctx, name_filter):
     """List all products in the database."""
     if ctx.obj["local_mode"]:
         from .storage import Storage
@@ -814,11 +920,18 @@ def list_products(ctx):
             console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(ctx.obj['server_url']))
             sys.exit(1)
 
+    if name_filter:
+        name_filter_lower = name_filter.lower()
+        products = [
+            p for p in products
+            if name_filter_lower in (p["name"] if isinstance(p, dict) else p.name).lower()
+        ]
+
     if not products:
         console.print("[yellow]No products found[/yellow]")
         return
 
-    table = Table(title="Products", box=box.SIMPLE)
+    table = Table(title=f"Products ({len(products):,} total)", box=box.SIMPLE)
     table.add_column("Name", style="cyan")
     table.add_column("Version", style="green")
     table.add_column("Type", style="magenta")
@@ -841,20 +954,54 @@ def list_products(ctx):
 
 
 @main.command("delete")
-@click.option("-p", "--product", required=True, help="Product name")
-@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("-p", "--product", help="Product name")
+@click.option("-v", "--version", "product_version", help="Product version")
+@click.option("--scan", "scan_id", type=int, help="Delete a single scan by ID")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
-def delete_product_cmd(ctx, product, product_version, yes):
-    """Delete a product and all its scans.
+def delete_product_cmd(ctx, product, product_version, scan_id, yes):
+    """Delete a product (and all its scans) or a single scan.
 
-    This permanently removes the product, all its scans, packages, and file records.
-
-    Example:
+    Examples:
         syfter delete -p myproduct -v 1.0
-        syfter delete -p myproduct -v 1.0 --yes  # Skip confirmation
+        syfter delete --scan 42
+        syfter delete -p myproduct -v 1.0 --yes
     """
-    # Confirm deletion unless --yes is provided
+    if scan_id and product:
+        console.print("[red]Use either --scan or -p/-v, not both[/red]")
+        sys.exit(1)
+    if not scan_id and not product:
+        console.print("[red]Specify --scan ID or -p PRODUCT -v VERSION[/red]")
+        sys.exit(1)
+    if product and not product_version:
+        console.print("[red]-v/--version is required with -p/--product[/red]")
+        sys.exit(1)
+
+    if scan_id:
+        if not yes:
+            confirm = click.confirm(f"Delete scan #{scan_id}?", default=False)
+            if not confirm:
+                console.print("[yellow]Cancelled[/yellow]")
+                return
+
+        if ctx.obj["local_mode"]:
+            console.print("[red]Error: scan deletion requires server mode[/red]")
+            sys.exit(1)
+
+        import httpx
+        from .client import SyfterClient, APIError
+        try:
+            with SyfterClient(ctx.obj["server_url"]) as client:
+                client.delete_scan(scan_id)
+                console.print(f"[green]Deleted scan #{scan_id}[/green]")
+        except httpx.ConnectError:
+            console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+            sys.exit(1)
+        except APIError as e:
+            console.print(f"[red]Delete failed: {e}[/red]")
+            sys.exit(1)
+        return
+
     if not yes:
         confirm = click.confirm(
             f"Delete product '{product}-{product_version}' and all its data?",
@@ -869,7 +1016,7 @@ def delete_product_cmd(ctx, product, product_version, yes):
         storage = Storage()
         deleted = storage.delete_product(product, product_version)
         if deleted:
-            console.print(f"[green]✓ Deleted {product}-{product_version}[/green]")
+            console.print(f"[green]Deleted {product}-{product_version}[/green]")
         else:
             console.print(f"[red]Product {product}-{product_version} not found[/red]")
             sys.exit(1)
@@ -879,13 +1026,175 @@ def delete_product_cmd(ctx, product, product_version, yes):
         try:
             with SyfterClient(ctx.obj["server_url"]) as client:
                 client.delete_product(product, product_version)
-                console.print(f"[green]✓ Deleted {product}-{product_version}[/green]")
+                console.print(f"[green]Deleted {product}-{product_version}[/green]")
         except httpx.ConnectError:
             console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
             sys.exit(1)
         except APIError as e:
             console.print(f"[red]Delete failed: {e}[/red]")
             sys.exit(1)
+
+
+@main.command("rename")
+@click.option("-p", "--product", required=True, help="Current product name")
+@click.option("-v", "--version", "product_version", required=True, help="Current product version")
+@click.option("--name", "new_name", help="New product name")
+@click.option("--new-version", "new_version", help="New product version")
+@click.option("--description", "new_description", help="New description")
+@click.pass_context
+def rename_product_cmd(ctx, product, product_version, new_name, new_version, new_description):
+    """Rename or relabel a product.
+
+    Examples:
+        syfter rename -p rhel -v 10.1 --name rhel-baseos
+        syfter rename -p rhel -v 10.1 --new-version 10.1-baseos
+        syfter rename -p rhel -v 10.1 --description "RHEL 10.1 BaseOS x86_64"
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: rename requires server mode[/red]")
+        sys.exit(1)
+
+    if not any([new_name, new_version, new_description]):
+        console.print("[yellow]Nothing to change. Use --name, --new-version, or --description.[/yellow]")
+        return
+
+    import httpx
+    from .client import SyfterClient, APIError
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            result = client.rename_product(
+                product, product_version,
+                new_name=new_name,
+                new_version=new_version,
+                new_description=new_description,
+            )
+            display_name = result.get("name", new_name or product)
+            display_version = result.get("version", new_version or product_version)
+            console.print(f"[green]Renamed to {display_name}-{display_version}[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Rename failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.group("tag")
+@click.pass_context
+def tag_group(ctx):
+    """Manage tags (list, rename, delete)."""
+    pass
+
+
+@tag_group.command("list")
+@click.option("-n", "--name", help="Filter by tag name (use %% as wildcard)")
+@click.option("--limit", type=int, default=100, help="Maximum results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def tag_list(ctx, name, limit, output_json):
+    """List all tags with scan counts."""
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: tags require server mode[/red]")
+        sys.exit(1)
+
+    import httpx
+    from .client import SyfterClient, APIError
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            results = client.list_tags(name=name, limit=limit)
+            if output_json:
+                click.echo(json.dumps(results, indent=2))
+                return
+            if not results:
+                console.print("[yellow]No tags found[/yellow]")
+                return
+            table = Table(title="Tags", box=box.SIMPLE)
+            table.add_column("ID", style="dim")
+            table.add_column("Name", style="cyan")
+            table.add_column("Scans", justify="right", style="green")
+            for t in results:
+                table.add_row(str(t["id"]), t["name"], str(t.get("scan_count", 0)))
+            console.print(table)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Failed to list tags: {e}[/red]")
+        sys.exit(1)
+
+
+@tag_group.command("rename")
+@click.argument("old_name")
+@click.argument("new_name")
+@click.pass_context
+def tag_rename(ctx, old_name, new_name):
+    """Rename a tag.
+
+    Examples:
+        syfter tag rename old-tag-name new-tag-name
+        syfter tag rename "old tag" "new tag"
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: tags require server mode[/red]")
+        sys.exit(1)
+
+    import httpx
+    from .client import SyfterClient, APIError
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            tags = client.list_tags(name=old_name)
+            matching = [t for t in tags if t["name"] == old_name]
+            if not matching:
+                console.print(f"[red]Tag '{old_name}' not found[/red]")
+                sys.exit(1)
+            result = client.rename_tag(matching[0]["id"], new_name)
+            console.print(f"[green]Renamed '{old_name}' to '{result['name']}'[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Rename failed: {e}[/red]")
+        sys.exit(1)
+
+
+@tag_group.command("delete")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def tag_delete(ctx, name, yes):
+    """Delete a tag (does not delete the scans).
+
+    Examples:
+        syfter tag delete old-tag
+        syfter tag delete old-tag --yes
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[red]Error: tags require server mode[/red]")
+        sys.exit(1)
+
+    if not yes:
+        confirm = click.confirm(f"Delete tag '{name}'?", default=False)
+        if not confirm:
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+
+    import httpx
+    from .client import SyfterClient, APIError
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            tags = client.list_tags(name=name)
+            matching = [t for t in tags if t["name"] == name]
+            if not matching:
+                console.print(f"[red]Tag '{name}' not found[/red]")
+                sys.exit(1)
+            client.delete_tag(matching[0]["id"])
+            console.print(f"[green]Deleted tag '{name}'[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Delete failed: {e}[/red]")
+        sys.exit(1)
 
 
 @main.command("stats")
@@ -1295,6 +1604,254 @@ def deps_cmd(ctx, dependency_name, package_name, dep_type, product_name, product
     except APIError as e:
         console.print(f"[red]Query failed: {e}[/red]")
         sys.exit(1)
+
+
+@main.command("vulns")
+@click.option("-p", "--product", required=True, help="Product name")
+@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("--module", help="OSIDB ps_module (e.g., rhel-9). Auto-detected if omitted.")
+@click.option("--env", type=click.Choice(["prod", "uat"]), default="prod", help="OSIDB environment")
+@click.option("--workers", type=int, default=4, help="Parallel OSIDB query workers")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option("-o", "--output", type=click.Path(), help="Write report to file")
+@click.option("--no-cache", is_flag=True, help="Disable OSIDB affect cache")
+@click.option("--cache-ttl", type=int, default=3600, help="Cache TTL in seconds")
+@click.pass_context
+def vulns_cmd(ctx, product, product_version, module, env, workers, output_json, output, no_cache, cache_ttl):
+    """Query OSIDB for unresolved CVEs affecting a product.
+
+    Resolves package list from syfter and correlates with OSIDB
+    vulnerability data. Requires SYFTER_SERVER to be set.
+
+    Examples:
+
+        syfter vulns -p rhel-baseos -v 9.6
+
+        syfter vulns -p ubi9 -v 9.7 --module rhel-9
+
+        syfter vulns -p go-toolset -v 1.25 --json
+
+        syfter vulns -p rhel-baseos -v 9.6 -o report.md
+    """
+    import concurrent.futures
+    from collections import defaultdict
+    from .osidb import (
+        ENVS, OsidbCache, detect_module, get_affects_cached,
+        get_flaws_batch, get_rh_cvss,
+    )
+
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Vulnerability queries require server mode.[/yellow]")
+        console.print("Set SYFTER_SERVER or use --server to connect.")
+        return
+
+    from .client import SyfterClient, APIError
+
+    server_url = ctx.obj["server_url"]
+
+    console.print(f"Fetching packages for {product}:{product_version}...", style="dim")
+    try:
+        with SyfterClient(server_url) as client:
+            packages = client.list_all_packages(product, product_version)
+    except Exception as e:
+        console.print(f"[red]Failed to fetch packages: {e}[/red]")
+        sys.exit(1)
+
+    if not packages:
+        console.print(f"[yellow]No packages found for {product}:{product_version}[/yellow]")
+        return
+
+    def _source_name(pkg):
+        srpm = pkg.get("source_rpm") or ""
+        if srpm:
+            parts = srpm.rsplit("-", 2)
+            if len(parts) >= 3:
+                return parts[0]
+        return pkg.get("name", "")
+
+    components = sorted(set(_source_name(pkg) for pkg in packages))
+    components = [c for c in components if c]
+
+    if not module:
+        module = detect_module(packages)
+    if not module:
+        console.print("[red]Could not auto-detect RHEL module. Use --module to specify.[/red]")
+        sys.exit(1)
+
+    console.print(f"  {len(packages)} packages, {len(components)} unique components", style="dim")
+    console.print(f"  Module: {module}", style="dim")
+
+    base_url = ENVS[env]
+    cache = None
+    if not no_cache and cache_ttl > 0:
+        cache = OsidbCache(ttl=cache_ttl)
+
+    console.print(f"Querying OSIDB ({env}) for unresolved affects...", style="dim")
+    all_affects = []
+    flaw_to_components = defaultdict(set)
+    cache_hits = 0
+    cache_misses = 0
+
+    cached_components = set()
+    if cache:
+        for c in components:
+            if cache.get(module, c) is not None:
+                cached_components.add(c)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {
+            ex.submit(get_affects_cached, base_url, module, c, cache): c
+            for c in components
+        }
+        for f in concurrent.futures.as_completed(futures):
+            comp = futures[f]
+            try:
+                affects = f.result()
+            except Exception as e:
+                console.print(f"  [red]{comp}: {e}[/red]")
+                continue
+            was_cached = comp in cached_components
+            if was_cached:
+                cache_hits += 1
+            else:
+                cache_misses += 1
+            if affects:
+                console.print(f"  {comp}: {len(affects)} open affects"
+                              f"{'  (cached)' if was_cached else ''}", style="dim")
+            for a in affects:
+                flaw_to_components[a["flaw"]].add(comp)
+            all_affects.extend(affects)
+
+    if cache:
+        cache.save()
+
+    if not all_affects:
+        console.print(f"\n[green]No unresolved CVEs found for {product}:{product_version}[/green]")
+        if output:
+            with open(output, "w") as f:
+                f.write(f"# Unresolved CVEs Report\n\n")
+                f.write(f"**Product:** {product}:{product_version}\n")
+                f.write(f"**Module:** {module}\n")
+                f.write(f"**Components scanned:** {len(components)}\n")
+                f.write(f"**Unresolved CVEs found:** 0\n")
+            console.print(f"Report written to {output}")
+        return
+
+    flaw_uuids = list(flaw_to_components.keys())
+    console.print(f"Fetching details for {len(flaw_uuids)} unique flaws...", style="dim")
+
+    flaws = {}
+    batch_size = 50
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        batches = [flaw_uuids[i:i + batch_size] for i in range(0, len(flaw_uuids), batch_size)]
+        futures = {ex.submit(get_flaws_batch, base_url, batch): i for i, batch in enumerate(batches)}
+        for f in concurrent.futures.as_completed(futures):
+            flaws.update(f.result())
+
+    affect_details = []
+    for a in all_affects:
+        flaw = flaws.get(a["flaw"])
+        if not flaw:
+            continue
+        affect_details.append({
+            "cve_id": flaw.get("cve_id") or flaw["uuid"][:12],
+            "impact": flaw.get("impact") or a.get("impact") or "",
+            "cvss": get_rh_cvss(flaw),
+            "title": flaw.get("title", ""),
+            "component": a["ps_component"],
+            "affectedness": a.get("affectedness", ""),
+            "resolution": a.get("resolution", "") or "(none)",
+            "workflow_state": flaw.get("workflow_state", ""),
+        })
+
+    seen = set()
+    deduped = []
+    for a in affect_details:
+        key = (a["cve_id"], a["component"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(a)
+
+    impact_order = {"CRITICAL": 0, "IMPORTANT": 1, "MODERATE": 2, "LOW": 3, "": 4}
+    deduped.sort(key=lambda a: (impact_order.get(a["impact"], 5), a["cve_id"]))
+
+    cve_groups = defaultdict(list)
+    cve_info = {}
+    for a in deduped:
+        cve_groups[a["cve_id"]].append(a)
+        if a["cve_id"] not in cve_info:
+            cve_info[a["cve_id"]] = a
+
+    console.print(f"\n  {len(cve_groups)} unique CVEs, {len(deduped)} component-affects", style="bold")
+
+    if output_json:
+        result = {
+            "product": product,
+            "version": product_version,
+            "module": module,
+            "components_scanned": len(components),
+            "cve_count": len(cve_groups),
+            "affect_count": len(deduped),
+            "cves": [
+                {
+                    "cve_id": cve_id,
+                    "impact": cve_info[cve_id]["impact"],
+                    "cvss": cve_info[cve_id]["cvss"],
+                    "title": cve_info[cve_id]["title"],
+                    "resolution": cve_info[cve_id]["resolution"],
+                    "workflow_state": cve_info[cve_id]["workflow_state"],
+                    "components": sorted(set(a["component"] for a in affects)),
+                }
+                for cve_id, affects in sorted(cve_groups.items())
+            ],
+        }
+        if output:
+            with open(output, "w") as f:
+                json.dump(result, f, indent=2)
+            console.print(f"JSON report written to {output}")
+        else:
+            click.echo(json.dumps(result, indent=2))
+        return
+
+    lines = []
+    lines.append(f"# Unresolved CVEs Report\n")
+    lines.append(f"**Product:** {product}:{product_version}")
+    lines.append(f"**Module:** {module}")
+    lines.append(f"**Components scanned:** {len(components)}")
+    lines.append(f"**Unresolved CVEs found:** {len(cve_groups)}")
+    lines.append(f"**Total component-affects:** {len(deduped)}")
+    if cache_hits:
+        lines.append(f"**Cache:** {cache_hits} hits, {cache_misses} misses")
+    lines.append("")
+
+    by_impact = defaultdict(list)
+    for cve_id in cve_groups:
+        info = cve_info[cve_id]
+        by_impact[info["impact"]].append(cve_id)
+
+    for imp in ["CRITICAL", "IMPORTANT", "MODERATE", "LOW", ""]:
+        if imp not in by_impact:
+            continue
+        label = imp or "UNSET"
+        cves = by_impact[imp]
+        lines.append(f"## {label} ({len(cves)})\n")
+        lines.append("| CVE | CVSS | Component(s) | Resolution | Status | Title |")
+        lines.append("|-----|------|-------------|------------|--------|-------|")
+        for cve_id in sorted(cves):
+            info = cve_info[cve_id]
+            comps = sorted(set(a["component"] for a in cve_groups[cve_id]))
+            cvss_str = f"{info['cvss']:.1f}" if info["cvss"] is not None else "N/A"
+            title = (info["title"] or "")[:80]
+            lines.append(f"| {cve_id} | {cvss_str} | {', '.join(comps)} | {info['resolution']} | {info['workflow_state']} | {title} |")
+        lines.append("")
+
+    report = "\n".join(lines)
+    if output:
+        with open(output, "w") as f:
+            f.write(report)
+        console.print(f"Report written to {output}")
+    else:
+        click.echo(report)
 
 
 @main.command("relationships")

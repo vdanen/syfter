@@ -508,11 +508,17 @@ class Storage:
                 params.append(pkg_version)
 
             if product_name:
-                query += " AND p.name = ?"
+                if "%" in product_name or "_" in product_name:
+                    query += " AND p.name LIKE ?"
+                else:
+                    query += " AND p.name = ?"
                 params.append(product_name)
 
             if product_version:
-                query += " AND p.version = ?"
+                if "%" in product_version or "_" in product_version:
+                    query += " AND p.version LIKE ?"
+                else:
+                    query += " AND p.version = ?"
                 params.append(product_version)
 
             query += " ORDER BY pkg.name LIMIT ?"
@@ -564,11 +570,17 @@ class Storage:
                 params.append(digest)
 
             if product_name:
-                query += " AND p.name = ?"
+                if "%" in product_name or "_" in product_name:
+                    query += " AND p.name LIKE ?"
+                else:
+                    query += " AND p.name = ?"
                 params.append(product_name)
 
             if product_version:
-                query += " AND p.version = ?"
+                if "%" in product_version or "_" in product_version:
+                    query += " AND p.version LIKE ?"
+                else:
+                    query += " AND p.version = ?"
                 params.append(product_version)
 
             query += " ORDER BY f.path LIMIT ?"

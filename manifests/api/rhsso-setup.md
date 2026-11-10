@@ -55,7 +55,7 @@ Replace the oauth-proxy container args in `deployment.yaml` with:
 args:
   - --https-address=:4443
   - --provider=oidc
-  - --oidc-issuer-url=https://sso.corp.redhat.com/auth/realms/<REALM>
+  - --oidc-issuer-url=https://sso.example.com/auth/realms/<REALM>
   - --client-id=syfter-api
   - --client-secret-file=/etc/oauth-proxy/client-secret
   - --upstream=http://localhost:8000

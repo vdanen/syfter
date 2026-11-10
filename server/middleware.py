@@ -1,11 +1,12 @@
 """
-Rate limiting and response caching middleware.
+Rate limiting, response caching, and access logging middleware.
 
 Replaces the nginx gateway's rate limiting (limit_req_zone) and
 response caching (proxy_cache) with application-level equivalents,
 allowing the nginx sidecar to be removed entirely.
 """
 
+import collections
 import logging
 import threading
 import time
@@ -240,3 +241,84 @@ async def cache_middleware(request: Request, call_next):
         media_type=response.media_type,
         headers=headers,
     )
+
+
+# ============================================================================
+# Access Log
+# ============================================================================
+
+_SKIP_LOG_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
+_log_queue = collections.deque(maxlen=5000)
+_log_lock = threading.Lock()
+_LOG_FLUSH_INTERVAL = 5  # seconds
+_LOG_RETENTION_HOURS = 168  # 7 days
+
+
+def _flush_access_log():
+    """Flush queued log entries to the database."""
+    from .db.session import get_session_factory
+    from .db.models import AccessLog
+    from datetime import datetime, timedelta
+
+    while True:
+        time.sleep(_LOG_FLUSH_INTERVAL)
+        with _log_lock:
+            if not _log_queue:
+                continue
+            entries = list(_log_queue)
+            _log_queue.clear()
+
+        try:
+            SessionLocal = get_session_factory()
+            db = SessionLocal()
+            try:
+                for entry in entries:
+                    db.add(AccessLog(**entry))
+                # Prune old entries
+                cutoff = datetime.utcnow() - timedelta(hours=_LOG_RETENTION_HOURS)
+                db.query(AccessLog).filter(AccessLog.timestamp < cutoff).delete()
+                db.commit()
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("Failed to flush access log", exc_info=True)
+
+
+_flush_thread = threading.Thread(target=_flush_access_log, daemon=True)
+_flush_started = False
+
+
+async def access_log_middleware(request: Request, call_next):
+    """Log API requests for audit trail."""
+    global _flush_started
+    if not _flush_started:
+        _flush_thread.start()
+        _flush_started = True
+
+    if request.url.path in _SKIP_LOG_PATHS or request.url.path.startswith(("/dashboard", "/css", "/js")):
+        return await call_next(request)
+
+    start = time.monotonic()
+    response = await call_next(request)
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+
+    team_name = getattr(request.state, "team_name", None)
+    key_prefix = None
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key:
+        key_prefix = api_key[:8]
+
+    client_ip = request.client.host if request.client else None
+
+    with _log_lock:
+        _log_queue.append({
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "response_ms": elapsed_ms,
+            "key_prefix": key_prefix,
+            "team_name": team_name,
+            "client_ip": client_ip,
+        })
+
+    return response

@@ -153,9 +153,23 @@ class SyfterClient:
 
     # Product operations
     def list_products(self) -> list:
-        """List all products."""
-        response = self.client.get(self._url("/products/"))
-        return self._handle_response(response)
+        """List all products, paginating through the full result set."""
+        all_products = []
+        offset = 0
+        limit = 500
+        while True:
+            response = self.client.get(
+                self._url("/products/"),
+                params={"limit": limit, "offset": offset},
+            )
+            batch = self._handle_response(response)
+            if not batch:
+                break
+            all_products.extend(batch)
+            if len(batch) < limit:
+                break
+            offset += limit
+        return all_products
 
     def get_product(self, name: str, version: str) -> dict:
         """Get a specific product."""
@@ -304,6 +318,50 @@ class SyfterClient:
     def delete_product(self, product_name: str, product_version: str) -> None:
         """Delete a product and all its scans."""
         response = self.client.delete(self._url(f"/products/{product_name}/{product_version}"))
+        if response.status_code >= 400:
+            self._handle_response(response)
+
+    def rename_product(
+        self,
+        product_name: str,
+        product_version: str,
+        new_name: Optional[str] = None,
+        new_version: Optional[str] = None,
+        new_description: Optional[str] = None,
+    ) -> dict:
+        """Rename or update a product."""
+        body = {}
+        if new_name is not None:
+            body["name"] = new_name
+        if new_version is not None:
+            body["version"] = new_version
+        if new_description is not None:
+            body["description"] = new_description
+        response = self.client.patch(
+            self._url(f"/products/{product_name}/{product_version}"),
+            json=body,
+        )
+        return self._handle_response(response)
+
+    def list_tags(self, name: Optional[str] = None, limit: int = 100) -> list:
+        """List all tags."""
+        params = {"limit": limit}
+        if name:
+            params["name"] = name
+        response = self.client.get(self._url("/tags/"), params=params)
+        return self._handle_response(response)
+
+    def rename_tag(self, tag_id: int, new_name: str) -> dict:
+        """Rename a tag."""
+        response = self.client.patch(
+            self._url(f"/tags/{tag_id}"),
+            json={"name": new_name},
+        )
+        return self._handle_response(response)
+
+    def delete_tag(self, tag_id: int) -> None:
+        """Delete a tag."""
+        response = self.client.delete(self._url(f"/tags/{tag_id}"))
         if response.status_code >= 400:
             self._handle_response(response)
 
@@ -605,6 +663,22 @@ class SyfterClient:
         response = self.client.get(self._url("/query/packages"), params=params)
         return self._handle_response(response)
 
+    def package_frequency(
+        self,
+        name: str,
+        product_name: Optional[str] = None,
+        product_version: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        """Get version frequency for a package across SBOMs."""
+        params = {"name": name, "limit": limit}
+        if product_name:
+            params["product_name"] = product_name
+        if product_version:
+            params["product_version"] = product_version
+        response = self.client.get(self._url("/query/packages/frequency"), params=params)
+        return self._handle_response(response)
+
     def search_files(
         self,
         path: Optional[str] = None,
@@ -691,6 +765,58 @@ class SyfterClient:
         response = self.client.get(
             self._url(f"/query/list/files/{product_name}/{product_version}")
         )
+        return self._handle_response(response)
+
+    def import_sbom(
+        self,
+        file_path: str,
+        product_name: str,
+        product_version: str,
+        source_type: str = "sbom",
+        description: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> dict:
+        """Import an SBOM file (SPDX, CycloneDX, or syft-json)."""
+        with open(file_path, "rb") as f:
+            files = {"sbom": (os.path.basename(file_path), f)}
+            data = {
+                "product_name": product_name,
+                "product_version": product_version,
+                "source_type": source_type,
+            }
+            if description:
+                data["description"] = description
+            if tags:
+                data["tags"] = ",".join(tags)
+            response = self.client.post(
+                self._url("/scans/import"),
+                data=data,
+                files=files,
+                timeout=300.0,
+            )
+        return self._handle_response(response)
+
+    def import_packages(
+        self,
+        file_path: str,
+        product_name: str,
+        product_version: str = "latest",
+        source_type: str = "package-list",
+    ) -> dict:
+        """Import a package list (JSON array or CSV) without a full SBOM."""
+        with open(file_path, "rb") as f:
+            files = {"packages": (os.path.basename(file_path), f)}
+            data = {
+                "product_name": product_name,
+                "product_version": product_version,
+                "source_type": source_type,
+            }
+            response = self.client.post(
+                self._url("/scans/import-packages"),
+                data=data,
+                files=files,
+                timeout=300.0,
+            )
         return self._handle_response(response)
 
     # ========================================================================

@@ -4,7 +4,7 @@ This guide covers building syfter for distribution to client environments.
 
 ## Version
 
-Current version: **0.9.1.0**
+Current version: **0.9.2.0**
 
 Version is defined in:
 - `pyproject.toml` - Package metadata
@@ -371,6 +371,10 @@ syfter --version
 ./scripts/run-tests.sh local
 ./scripts/run-tests.sh coverage
 ```
+
+The test runner installs the editable project with the `[all]` extra before
+running tests. This includes both the test tools and server dependencies, which
+the test modules import during collection.
 
 ### Using pip
 

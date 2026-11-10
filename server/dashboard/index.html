@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Syfter</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <nav class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h1>Syfter</h1>
+    </div>
+    <ul class="nav-links">
+      <li><a href="#/" data-route="/">Overview</a></li>
+      <li><a href="#/products" data-route="/products">Products</a></li>
+      <li><a href="#/packages" data-route="/packages">Packages</a></li>
+      <li><a href="#/import" data-route="/import">Import</a></li>
+      <li><a href="#/frequency" data-route="/frequency">Frequency</a></li>
+    </ul>
+    <div class="sidebar-footer">
+      <button id="logout-btn" class="btn-ghost btn-sm">Logout</button>
+    </div>
+  </nav>
+  <main class="content">
+    <div id="app"></div>
+  </main>
+  <script src="js/api.js"></script>
+  <script src="js/views/stats.js"></script>
+  <script src="js/views/products.js"></script>
+  <script src="js/views/product-detail.js"></script>
+  <script src="js/views/packages.js"></script>
+  <script src="js/views/import.js"></script>
+  <script src="js/views/frequency.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

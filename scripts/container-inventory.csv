@@ -1,0 +1,7 @@
+image_ref,product_name,product_version,description
+registry.redhat.io/ubi9/ubi:9.7,ubi9,9.7,Universal Base Image 9.7
+registry.redhat.io/ubi9/ubi-minimal:9.7,ubi9-minimal,9.7,Universal Base Image 9.7 Minimal
+registry.redhat.io/openshift4/openstack-resource-controller-rhel9:v4.19.0,openstack-resource-controller-rhel9,v4.19.0,OpenStack Resource Controller for RHEL 9
+registry.redhat.io/openshift4/ose-cli-rhel9:v4.19.0,ose-cli-rhel9,v4.19.0,OpenShift CLI for RHEL 9
+registry.redhat.io/rhel9/go-toolset:1.23,go-toolset-rhel9,1.23,Go Toolset for RHEL 9
+registry.redhat.io/rhel9/python-312:latest,python-312-rhel9,latest,Python 3.12 for RHEL 9

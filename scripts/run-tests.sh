@@ -43,12 +43,11 @@ echo_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Ensure pytest is installed
-ensure_pytest() {
-    if ! python -c "import pytest" 2>/dev/null; then
-        echo_warn "pytest not installed, installing dev dependencies..."
-        pip install -e ".[dev]"
-    fi
+# Ensure the complete development environment is installed. The test suite
+# imports server modules during collection, so [dev] alone is not sufficient.
+ensure_test_dependencies() {
+    echo_info "Installing test dependencies (.[all])..."
+    python -m pip install -e ".[all]"
 }
 
 # Start the test stack
@@ -89,13 +88,13 @@ MODE="${1:-local}"
 
 case "$MODE" in
     local)
-        ensure_pytest
+        ensure_test_dependencies
         echo_info "Running local tests (SQLite)..."
-        pytest tests/ -m "not server_only" -v
+        python -m pytest tests/ -m "not server_only" -v
         ;;
     
     server)
-        ensure_pytest
+        ensure_test_dependencies
         echo_info "Running server tests against $SERVER_URL..."
         
         # Check if server is running
@@ -106,11 +105,11 @@ case "$MODE" in
             exit 1
         fi
         
-        SYFTER_TEST_SERVER="$SERVER_URL" pytest tests/ -m "server_only" -v
+        SYFTER_TEST_SERVER="$SERVER_URL" python -m pytest tests/ -m "server_only" -v
         ;;
     
     server-isolated)
-        ensure_pytest
+        ensure_test_dependencies
         echo_info "Running server tests with isolated test stack..."
         
         # Check if test stack is already running
@@ -124,7 +123,7 @@ case "$MODE" in
         
         # Run tests (with visible output for seeding)
         echo_info "Running tests (first run will scan a test container, ~1-2 min)..."
-        SYFTER_TEST_SERVER="$TEST_SERVER_URL" pytest tests/ -m "server_only" -v -s
+        SYFTER_TEST_SERVER="$TEST_SERVER_URL" python -m pytest tests/ -m "server_only" -v -s
         TEST_RESULT=$?
         
         # Clean up: stop the stack if we started it
@@ -142,15 +141,15 @@ case "$MODE" in
         ;;
     
     all)
-        ensure_pytest
+        ensure_test_dependencies
         echo_info "Running ALL tests..."
         echo_info "  - Local tests first..."
-        pytest tests/ -m "not server_only" -v
+        python -m pytest tests/ -m "not server_only" -v
         
         echo ""
         echo_info "  - Server tests against $SERVER_URL..."
         if curl -sf "$SERVER_URL/health" > /dev/null 2>&1; then
-            SYFTER_TEST_SERVER="$SERVER_URL" pytest tests/ -m "server_only" -v
+            SYFTER_TEST_SERVER="$SERVER_URL" python -m pytest tests/ -m "server_only" -v
         else
             echo_warn "Server not running, skipping server tests"
             echo_info "Use 'server-isolated' for isolated server testing"
@@ -158,15 +157,15 @@ case "$MODE" in
         ;;
     
     quick)
-        ensure_pytest
+        ensure_test_dependencies
         echo_info "Running quick tests (skipping slow)..."
-        pytest tests/ -m "not server_only and not slow" -v
+        python -m pytest tests/ -m "not server_only and not slow" -v
         ;;
     
     coverage)
-        ensure_pytest
+        ensure_test_dependencies
         echo_info "Running tests with coverage..."
-        pytest tests/ -m "not server_only" --cov=syfter --cov-report=html --cov-report=term -v
+        python -m pytest tests/ -m "not server_only" --cov=syfter --cov-report=html --cov-report=term -v
         echo_info "Coverage report: htmlcov/index.html"
         ;;
     

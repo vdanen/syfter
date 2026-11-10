@@ -3,10 +3,12 @@ API key authentication middleware and key management.
 """
 
 import hashlib
+import json
 import logging
 import os
 import secrets
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -15,13 +17,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .db import get_db, ApiKey
+from .db import get_db, ApiKey, AccessLog
 
 logger = logging.getLogger(__name__)
 
 # In-memory TTL cache for API key lookups
 _key_cache: dict[str, tuple[float, dict]] = {}
 _cache_ttl: int = 60  # seconds
+
+# JWKS cache for OIDC Bearer token validation
+_jwks_cache: dict = {}
+_jwks_cache_time: float = 0
 
 
 def _hash_key(api_key: str) -> str:
@@ -50,6 +56,71 @@ def _cache_set(key_hash: str, data: dict):
     _key_cache[key_hash] = (time.time(), data)
 
 
+def _get_jwks(issuer_url: str, cache_ttl: int) -> dict:
+    """Fetch and cache JWKS from the OIDC issuer."""
+    global _jwks_cache, _jwks_cache_time
+    if _jwks_cache and (time.time() - _jwks_cache_time) < cache_ttl:
+        return _jwks_cache
+
+    try:
+        oidc_url = f"{issuer_url.rstrip('/')}/.well-known/openid-configuration"
+        with urllib.request.urlopen(oidc_url, timeout=10) as resp:
+            oidc_config = json.loads(resp.read())
+        jwks_uri = oidc_config["jwks_uri"]
+        with urllib.request.urlopen(jwks_uri, timeout=10) as resp:
+            _jwks_cache = json.loads(resp.read())
+        _jwks_cache_time = time.time()
+        return _jwks_cache
+    except Exception as e:
+        logger.warning(f"Failed to fetch JWKS from {issuer_url}: {e}")
+        return _jwks_cache  # return stale cache if available
+
+
+def _validate_bearer_token(token: str) -> Optional[dict]:
+    """Validate a Bearer JWT token against the configured OIDC issuer.
+
+    Returns decoded claims dict on success, None on failure.
+    """
+    from .config import get_config
+    config = get_config()
+
+    if not config.oidc_issuer_url:
+        return None
+
+    try:
+        import jwt
+        from jwt import PyJWKClient
+
+        jwks = _get_jwks(config.oidc_issuer_url, config.oidc_jwks_cache_ttl)
+        if not jwks:
+            return None
+
+        jwk_client = PyJWKClient.__new__(PyJWKClient)
+        jwk_client.jwk_set = jwt.PyJWKSet.from_dict(jwks)
+
+        header = jwt.get_unverified_header(token)
+        key = None
+        for jwk in jwk_client.jwk_set.keys:
+            if jwk.key_id == header.get("kid"):
+                key = jwk.key
+                break
+
+        if not key:
+            return None
+
+        claims = jwt.decode(
+            token,
+            key,
+            algorithms=["RS256"],
+            audience=config.oidc_client_id,
+            issuer=config.oidc_issuer_url,
+        )
+        return claims
+    except Exception as e:
+        logger.debug(f"Bearer token validation failed: {e}")
+        return None
+
+
 # Paths that skip authentication
 SKIP_AUTH_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc"}
 
@@ -63,18 +134,35 @@ async def auth_middleware(request: Request, call_next):
     if not config.auth_enabled:
         request.state.team_name = "anonymous"
         request.state.api_key_id = None
+        request.state.role = "admin"
         return await call_next(request)
 
-    # Skip auth for exempt paths
-    if request.url.path in SKIP_AUTH_PATHS:
+    # Skip auth for exempt paths and dashboard static files
+    if request.url.path in SKIP_AUTH_PATHS or request.url.path.startswith("/dashboard"):
         return await call_next(request)
 
     # Read API key from header
     api_key = request.headers.get("X-API-Key")
+
+    # Check for Bearer token if no API key
     if not api_key:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            claims = _validate_bearer_token(token)
+            if claims:
+                username = claims.get("preferred_username") or claims.get("sub", "unknown")
+                request.state.team_name = username
+                request.state.api_key_id = None
+                request.state.role = "write"
+                return await call_next(request)
+            return JSONResponse(
+                status_code=401,
+                content={"error": "Invalid or expired Bearer token"},
+            )
         return JSONResponse(
             status_code=401,
-            content={"error": "Missing API key", "hint": "Set X-API-Key header"},
+            content={"error": "Missing API key or Bearer token", "hint": "Set X-API-Key header or Authorization: Bearer <token>"},
         )
 
     key_hash = _hash_key(api_key)
@@ -89,6 +177,7 @@ async def auth_middleware(request: Request, call_next):
             )
         request.state.team_name = cached["team_name"]
         request.state.api_key_id = cached["id"]
+        request.state.role = cached.get("role", "write")
         return await call_next(request)
 
     # Look up in database
@@ -115,15 +204,18 @@ async def auth_middleware(request: Request, call_next):
         db_key.last_used_at = datetime.utcnow()
         db.commit()
 
+        role = getattr(db_key, "role", None) or ("admin" if db_key.is_admin else "write")
         _cache_set(key_hash, {
             "valid": True,
             "id": db_key.id,
             "team_name": db_key.team_name,
             "is_admin": db_key.is_admin,
+            "role": role,
         })
 
         request.state.team_name = db_key.team_name
         request.state.api_key_id = db_key.id
+        request.state.role = role
     finally:
         db.close()
 
@@ -132,16 +224,18 @@ async def auth_middleware(request: Request, call_next):
 
 def require_admin(request: Request):
     """FastAPI dependency that requires an admin API key."""
-    api_key = request.headers.get("X-API-Key")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="Missing API key")
-
-    key_hash = _hash_key(api_key)
-    cached = _cache_get(key_hash)
-    if cached and cached.get("valid") and cached.get("is_admin"):
-        return cached
-
+    role = getattr(request.state, "role", None)
+    if role == "admin":
+        return
     raise HTTPException(status_code=403, detail="Admin API key required")
+
+
+def require_write(request: Request):
+    """FastAPI dependency that requires write (or admin) access."""
+    role = getattr(request.state, "role", None)
+    if role in ("write", "admin"):
+        return
+    raise HTTPException(status_code=403, detail="Write access required (your key is read-only)")
 
 
 def seed_admin_key(db: Session, admin_key: Optional[str] = None):
@@ -166,6 +260,7 @@ def seed_admin_key(db: Session, admin_key: Optional[str] = None):
         team_name="admin",
         description="Auto-generated admin key",
         is_admin=True,
+        role="admin",
     )
     db.add(db_key)
     db.commit()
@@ -181,6 +276,7 @@ class ApiKeyCreateRequest(BaseModel):
     team_name: str = Field(..., description="Team name this key belongs to")
     description: Optional[str] = Field(default=None, description="Key description")
     expires_in_days: Optional[int] = Field(default=None, description="Days until expiration")
+    role: str = Field(default="write", description="Key role: read, write, or admin")
 
 
 class ApiKeyResponse(BaseModel):
@@ -190,6 +286,7 @@ class ApiKeyResponse(BaseModel):
     description: Optional[str]
     is_active: bool
     is_admin: bool
+    role: str = "write"
     created_at: datetime
     last_used_at: Optional[datetime]
     expires_at: Optional[datetime]
@@ -210,6 +307,9 @@ def create_api_key(
     db: Session = Depends(get_db),
 ):
     """Create a new API key. Returns the plaintext key exactly once."""
+    if body.role not in ("read", "write", "admin"):
+        raise HTTPException(status_code=400, detail="role must be read, write, or admin")
+
     api_key = secrets.token_hex(32)
     key_hash = _hash_key(api_key)
 
@@ -223,6 +323,8 @@ def create_api_key(
         team_name=body.team_name,
         description=body.description,
         expires_at=expires_at,
+        role=body.role,
+        is_admin=(body.role == "admin"),
     )
     db.add(db_key)
     db.commit()
@@ -235,6 +337,7 @@ def create_api_key(
         description=db_key.description,
         is_active=db_key.is_active,
         is_admin=db_key.is_admin,
+        role=db_key.role,
         created_at=db_key.created_at,
         last_used_at=db_key.last_used_at,
         expires_at=db_key.expires_at,
@@ -258,6 +361,7 @@ def list_api_keys(
             description=k.description,
             is_active=k.is_active,
             is_admin=k.is_admin,
+            role=getattr(k, "role", "admin" if k.is_admin else "write"),
             created_at=k.created_at,
             last_used_at=k.last_used_at,
             expires_at=k.expires_at,
@@ -283,3 +387,68 @@ def revoke_api_key(
 
     # Invalidate cache
     _key_cache.clear()
+
+
+# --- Admin access log endpoints ---
+
+access_log_router = APIRouter(prefix="/admin/access-log", tags=["admin"])
+
+
+@access_log_router.get("/")
+def get_access_log(
+    request: Request,
+    limit: int = 100,
+    team: Optional[str] = None,
+    admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Query recent API access log entries (admin only)."""
+    query = db.query(AccessLog).order_by(AccessLog.timestamp.desc())
+    if team:
+        query = query.filter(AccessLog.team_name == team)
+    rows = query.limit(limit).all()
+    return [
+        {
+            "id": r.id,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "method": r.method,
+            "path": r.path,
+            "status_code": r.status_code,
+            "response_ms": r.response_ms,
+            "key_prefix": r.key_prefix,
+            "team_name": r.team_name,
+            "client_ip": r.client_ip,
+        }
+        for r in rows
+    ]
+
+
+@access_log_router.get("/summary")
+def get_access_log_summary(
+    request: Request,
+    admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Summarize access log by team (admin only)."""
+    from sqlalchemy import func
+
+    rows = (
+        db.query(
+            AccessLog.team_name,
+            func.count(AccessLog.id).label("request_count"),
+            func.avg(AccessLog.response_ms).label("avg_response_ms"),
+            func.max(AccessLog.timestamp).label("last_request"),
+        )
+        .group_by(AccessLog.team_name)
+        .order_by(func.count(AccessLog.id).desc())
+        .all()
+    )
+    return [
+        {
+            "team_name": r.team_name,
+            "request_count": r.request_count,
+            "avg_response_ms": round(r.avg_response_ms) if r.avg_response_ms else 0,
+            "last_request": r.last_request.isoformat() if r.last_request else None,
+        }
+        for r in rows
+    ]

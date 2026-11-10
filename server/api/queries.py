@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import collate, text
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, Scan, System, Package, File, ImageLayer, Dependency, ComponentRelationship
-from .schemas import PackageResponse, FileResponse, StatsResponse, DependencyResponse, ComponentRelationshipResponse
+from ..db import get_db, Product, Scan, System, Package, File, ImageLayer, Dependency, ComponentRelationship, Tag, ScanTag
+from .schemas import PackageResponse, PackageFrequencyResponse, FileResponse, StatsResponse, DependencyResponse, ComponentRelationshipResponse
 from ..config import get_config
 
 router = APIRouter()
@@ -74,25 +74,29 @@ class SystemFileResponse(BaseModel):
 def search_packages(
     name: Optional[str] = Query(default=None, description="Package name pattern (use % as wildcard)"),
     pkg_version: Optional[str] = Query(default=None, description="Package version pattern (use % as wildcard)"),
-    product_name: Optional[str] = Query(default=None, description="Filter by product name"),
-    product_version: Optional[str] = Query(default=None, description="Filter by product version"),
+    product_name: Optional[str] = Query(default=None, description="Filter by product name (use % as wildcard)"),
+    product_version: Optional[str] = Query(default=None, description="Filter by product version (use % as wildcard)"),
     layer_type: Optional[str] = Query(default=None, description="Filter by layer type: 'base' or 'app'"),
-    limit: int = Query(default=100, le=1000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    purl_type: Optional[str] = Query(default=None, description="Filter by package ecosystem: rpm, maven, pypi, npm, golang, gem, cargo"),
+    tag: Optional[str] = Query(default=None, description="Filter by scan tag name"),
+    limit: int = Query(default=100, ge=0, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
-    """Search for packages across all products. Supports layer_type filter for container scans."""
-    # Subquery: find matching package IDs with early LIMIT termination.
-    # For broad patterns like "lib%" (~500K matches), this lets PostgreSQL
-    # use the index to grab just the first N IDs, then JOIN only those.
+    """Search for packages across all products. Supports layer_type, purl_type, and tag filters."""
     inner = db.query(Package.id)
 
     if product_name or product_version:
         inner = inner.join(Product, Package.product_id == Product.id)
-        if product_name:
-            inner = inner.filter(Product.name == product_name)
-        if product_version:
-            inner = inner.filter(Product.version == product_version)
+        inner = _apply_like_filter(inner, Product.name, product_name)
+        inner = _apply_like_filter(inner, Product.version, product_version)
+
+    if tag:
+        inner = (
+            inner.join(ScanTag, ScanTag.scan_id == Package.scan_id)
+            .join(Tag, Tag.id == ScanTag.tag_id)
+            .filter(Tag.name == tag)
+        )
 
     if layer_type:
         inner = inner.join(
@@ -106,6 +110,8 @@ def search_packages(
 
     inner = _apply_like_filter(inner, Package.name, name)
     inner = _apply_like_filter(inner, Package.version, pkg_version)
+    if purl_type:
+        inner = inner.filter(Package.purl.like(f"pkg:{purl_type}/%"))
     inner = inner.order_by(collate(Package.name, "C")).offset(offset).limit(limit)
     pkg_ids = inner.subquery()
 
@@ -116,6 +122,18 @@ def search_packages(
         .order_by(Package.name)
         .all()
     )
+
+    scan_ids = list({pkg.scan_id for pkg, _, _ in results})
+    tag_map = {}
+    if scan_ids:
+        tag_rows = (
+            db.query(ScanTag.scan_id, Tag.name)
+            .join(Tag, ScanTag.tag_id == Tag.id)
+            .filter(ScanTag.scan_id.in_(scan_ids))
+            .all()
+        )
+        for sid, tname in tag_rows:
+            tag_map.setdefault(sid, []).append(tname)
 
     return [
         PackageResponse(
@@ -134,8 +152,57 @@ def search_packages(
             layer_id=pkg.layer_id,
             layer_index=pkg.layer_index,
             source_image=pkg.source_image,
+            tags=sorted(tag_map.get(pkg.scan_id, [])),
         )
         for pkg, pname, pversion in results
+    ]
+
+
+@router.get("/packages/frequency", response_model=List[PackageFrequencyResponse])
+def package_frequency(
+    name: str = Query(..., description="Package name (exact match or % wildcard)"),
+    product_name: Optional[str] = Query(default=None, description="Filter by product name (use % as wildcard)"),
+    product_version: Optional[str] = Query(default=None, description="Filter by product version (use % as wildcard)"),
+    purl_type: Optional[str] = Query(default=None, description="Filter by package ecosystem: rpm, maven, pypi, npm, golang, gem, cargo"),
+    limit: int = Query(default=100, ge=0, le=1000, description="Maximum versions to return"),
+    db: Session = Depends(get_db),
+):
+    """Count how many SBOMs contain each version of a package.
+
+    Returns versions sorted by frequency (most common first), with the list
+    of product names that contain each version.
+    """
+    from sqlalchemy import func
+
+    query = (
+        db.query(
+            Package.version,
+            func.count(func.distinct(Product.id)).label("sbom_count"),
+            func.array_agg(func.distinct(Product.name)).label("products"),
+        )
+        .join(Product, Package.product_id == Product.id)
+    )
+
+    query = _apply_like_filter(query, Package.name, name)
+    query = _apply_like_filter(query, Product.name, product_name)
+    query = _apply_like_filter(query, Product.version, product_version)
+    if purl_type:
+        query = query.filter(Package.purl.like(f"pkg:{purl_type}/%"))
+
+    results = (
+        query.group_by(Package.version)
+        .order_by(func.count(func.distinct(Product.id)).desc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        PackageFrequencyResponse(
+            version=version,
+            sbom_count=count,
+            products=sorted(prods),
+        )
+        for version, count, prods in results
     ]
 
 
@@ -143,10 +210,10 @@ def search_packages(
 def search_files(
     path: Optional[str] = Query(default=None, description="File path pattern (use % as wildcard)"),
     digest: Optional[str] = Query(default=None, description="File digest (exact match)"),
-    product_name: Optional[str] = Query(default=None, description="Filter by product name"),
-    product_version: Optional[str] = Query(default=None, description="Filter by product version"),
-    limit: int = Query(default=100, le=1000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    product_name: Optional[str] = Query(default=None, description="Filter by product name (use % as wildcard)"),
+    product_version: Optional[str] = Query(default=None, description="Filter by product version (use % as wildcard)"),
+    limit: int = Query(default=100, ge=0, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """Search for files across all products."""
@@ -154,10 +221,8 @@ def search_files(
 
     if product_name or product_version:
         inner = inner.join(Product, File.product_id == Product.id)
-        if product_name:
-            inner = inner.filter(Product.name == product_name)
-        if product_version:
-            inner = inner.filter(Product.version == product_version)
+        inner = _apply_like_filter(inner, Product.name, product_name)
+        inner = _apply_like_filter(inner, Product.version, product_version)
 
     inner = _apply_like_filter(inner, File.path, path)
     if digest:
@@ -255,8 +320,8 @@ def get_stats(db: Session = Depends(get_db)):
 def list_all_packages(
     product_name: str,
     product_version: str,
-    limit: int = Query(default=10000, le=100000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    limit: int = Query(default=10000, ge=0, le=100000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """
@@ -268,7 +333,7 @@ def list_all_packages(
     query = (
         db.query(
             Package.name, Package.version, Package.release, Package.arch,
-            Package.source_image, Package.layer_id
+            Package.source_rpm, Package.source_image, Package.layer_id
         )
         .join(Product, Package.product_id == Product.id)
         .filter(Product.name == product_name, Product.version == product_version)
@@ -283,10 +348,11 @@ def list_all_packages(
             "version": version,
             "release": release,
             "arch": arch,
+            "source_rpm": source_rpm,
             "source_image": source_image,
             "layer_id": layer_id,
         }
-        for name, version, release, arch, source_image, layer_id in query.all()
+        for name, version, release, arch, source_rpm, source_image, layer_id in query.all()
     ]
 
 
@@ -294,8 +360,8 @@ def list_all_packages(
 def list_all_files(
     product_name: str,
     product_version: str,
-    limit: int = Query(default=10000, le=100000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    limit: int = Query(default=10000, ge=0, le=100000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """
@@ -323,11 +389,11 @@ def list_all_files(
 def search_dependencies(
     package_name: Optional[str] = Query(default=None, description="Package name (exact or % wildcard)"),
     dependency_name: Optional[str] = Query(default=None, description="Dependency name (exact or % wildcard)"),
-    dependency_type: Optional[str] = Query(default=None, description="'requires' or 'provides'"),
-    product_name: Optional[str] = Query(default=None, description="Filter by product name"),
-    product_version: Optional[str] = Query(default=None, description="Filter by product version"),
-    limit: int = Query(default=100, le=1000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    dependency_type: Optional[str] = Query(default=None, description="'requires', 'provides', or 'depends_on'"),
+    product_name: Optional[str] = Query(default=None, description="Filter by product name (use % as wildcard)"),
+    product_version: Optional[str] = Query(default=None, description="Filter by product version (use % as wildcard)"),
+    limit: int = Query(default=100, ge=0, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """Search dependency records (RPM requires/provides)."""
@@ -349,10 +415,8 @@ def search_dependencies(
         query = _apply_like_filter(query, Dependency.dependency_name, dependency_name)
     if dependency_type:
         query = query.filter(Dependency.dependency_type == dependency_type)
-    if product_name:
-        query = query.filter(Product.name == product_name)
-    if product_version:
-        query = query.filter(Product.version == product_version)
+    query = _apply_like_filter(query, Product.name, product_name)
+    query = _apply_like_filter(query, Product.version, product_version)
 
     results = query.order_by(Dependency.id).offset(offset).limit(limit).all()
 
@@ -376,10 +440,10 @@ def search_dependencies(
 
 @router.get("/components", response_model=List[ComponentRelationshipResponse])
 def search_components(
-    product_name: Optional[str] = Query(default=None, description="Parent product name"),
-    component_name: Optional[str] = Query(default=None, description="Component product name"),
-    limit: int = Query(default=100, le=1000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    product_name: Optional[str] = Query(default=None, description="Parent product name (use % as wildcard)"),
+    component_name: Optional[str] = Query(default=None, description="Component product name (use % as wildcard)"),
+    limit: int = Query(default=100, ge=0, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """Search component relationships between products."""
@@ -398,10 +462,8 @@ def search_components(
         .join(ComponentProduct, ComponentRelationship.component_product_id == ComponentProduct.id)
     )
 
-    if product_name:
-        query = query.filter(ParentProduct.name == product_name)
-    if component_name:
-        query = query.filter(ComponentProduct.name == component_name)
+    query = _apply_like_filter(query, ParentProduct.name, product_name)
+    query = _apply_like_filter(query, ComponentProduct.name, component_name)
 
     results = query.offset(offset).limit(limit).all()
 
@@ -504,7 +566,7 @@ def get_provenance(
 def trace_package(
     name: str = Query(..., description="Package name (exact match)"),
     pkg_version: Optional[str] = Query(default=None, description="Version pattern (% wildcard)"),
-    limit: int = Query(default=200, le=1000),
+    limit: int = Query(default=200, ge=0, le=1000),
     db: Session = Depends(get_db),
 ):
     """Trace a package across the full product stack (repos -> base images -> layered containers)."""
@@ -636,8 +698,8 @@ def search_system_packages(
     name: Optional[str] = Query(default=None, description="Package name pattern (use % as wildcard)"),
     hostname: Optional[str] = Query(default=None, description="Filter by hostname"),
     tag: Optional[str] = Query(default=None, description="Filter by system tag"),
-    limit: int = Query(default=100, le=1000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    limit: int = Query(default=100, ge=0, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """Search for packages across all systems."""
@@ -687,8 +749,8 @@ def search_system_files(
     digest: Optional[str] = Query(default=None, description="File digest (exact match)"),
     hostname: Optional[str] = Query(default=None, description="Filter by hostname"),
     tag: Optional[str] = Query(default=None, description="Filter by system tag"),
-    limit: int = Query(default=100, le=1000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    limit: int = Query(default=100, ge=0, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """Search for files across all systems."""
@@ -734,8 +796,8 @@ def search_system_files(
 @router.get("/systems/list/packages/{hostname}")
 def list_system_packages(
     hostname: str,
-    limit: int = Query(default=10000, le=100000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    limit: int = Query(default=10000, ge=0, le=100000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """
@@ -766,8 +828,8 @@ def list_system_packages(
 @router.get("/systems/list/files/{hostname}")
 def list_system_files(
     hostname: str,
-    limit: int = Query(default=10000, le=100000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
+    limit: int = Query(default=10000, ge=0, le=100000, description="Maximum results"),
+    offset: int = Query(default=0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """

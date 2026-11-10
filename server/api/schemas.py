@@ -51,6 +51,8 @@ class ProductCreate(BaseModel):
     cpe_product: Optional[str] = Field(default=None, description="CPE product string")
     purl_namespace: str = Field(default="redhat", description="PURL namespace")
     description: Optional[str] = Field(default=None, description="Product description")
+    ps_update_stream: Optional[str] = Field(default=None, description="OSIDB ps_update_stream (e.g., rhel-9.6.z)")
+    ps_module: Optional[str] = Field(default=None, description="OSIDB ps_module (e.g., rhel-9)")
 
 
 class ProductResponse(BaseModel):
@@ -64,14 +66,32 @@ class ProductResponse(BaseModel):
     cpe_product: Optional[str]
     purl_namespace: str
     description: Optional[str]
+    ps_update_stream: Optional[str] = None
+    ps_module: Optional[str] = None
     created_at: datetime
     scan_count: int = 0
     total_packages: int = 0
     total_files: int = 0
-    source_type: Optional[str] = None  # Type of scan: directory, container, archive, etc.
+    source_type: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class ProductUpdate(BaseModel):
+    """Schema for updating a product."""
+
+    name: Optional[str] = Field(default=None, description="New product name")
+    version: Optional[str] = Field(default=None, description="New product version")
+    description: Optional[str] = Field(default=None, description="New description")
+    ps_update_stream: Optional[str] = Field(default=None, description="New ps_update_stream")
+    ps_module: Optional[str] = Field(default=None, description="New ps_module")
+
+
+class TagUpdate(BaseModel):
+    """Schema for renaming a tag."""
+
+    name: str = Field(..., description="New tag name")
 
 
 # Scan schemas
@@ -112,6 +132,31 @@ class ScanResponse(BaseModel):
     file_count: int
     original_size_bytes: int
     modified_size_bytes: int
+    deps_status: Optional[str] = None
+    deps_count: int = 0
+    tags: List[str] = []
+
+    class Config:
+        from_attributes = True
+
+
+class ImportResponse(BaseModel):
+    """Schema for SBOM import response."""
+
+    id: int
+    product_id: int
+    product_name: str
+    product_version: str
+    source_path: str
+    source_type: str
+    scan_timestamp: datetime
+    syft_version: Optional[str]
+    package_count: int
+    file_count: int
+    original_size_bytes: int
+    modified_size_bytes: int
+    sbom_format: str = Field(description="Detected SBOM format (spdx, cyclonedx, syft-json)")
+    tags: list[str] = Field(default_factory=list, description="Applied tag names")
 
     class Config:
         from_attributes = True
@@ -169,6 +214,7 @@ class PackageResponse(BaseModel):
     layer_id: Optional[str] = None
     layer_index: Optional[int] = None
     source_image: Optional[str] = None
+    tags: List[str] = []
 
     class Config:
         from_attributes = True
@@ -293,6 +339,117 @@ class ComponentRelationshipResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# Tag schemas
+class TagCreate(BaseModel):
+    """Schema for adding tags to a scan."""
+
+    tags: List[str] = Field(..., description="Tag names to add")
+
+
+class TagResponse(BaseModel):
+    """Schema for tag response."""
+
+    id: int
+    name: str
+    created_at: datetime
+    scan_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class PackageFrequencyResponse(BaseModel):
+    """Schema for package version frequency across SBOMs."""
+
+    version: str
+    sbom_count: int = Field(description="Number of SBOMs containing this version")
+    products: List[str] = Field(description="Product names containing this version")
+
+    class Config:
+        from_attributes = True
+
+
+# VULCAN analysis schemas
+class VulcanAnalyzeRequest(BaseModel):
+    """Request to run a VULCAN CVE impact analysis."""
+
+    component: str = Field(..., description="RPM package name (e.g., 'openssl')")
+    ps_module: Optional[str] = Field(default=None, description="OSIDB ps_module (e.g., 'rhel-9')")
+    cve_id: Optional[str] = Field(default=None, description="CVE identifier for labeling")
+    impact: Optional[str] = Field(default=None, description="CRITICAL/IMPORTANT/MODERATE/LOW")
+
+
+class VulcanTrackerResponse(BaseModel):
+    """A deduplicated tracker recommendation."""
+
+    id: int
+    tracker_type: str
+    product_name: str
+    product_version: str
+    covers_count: int
+    covered_products: List[str]
+    package_version: Optional[str]
+    package_arch: Optional[str]
+    status: str
+
+    class Config:
+        from_attributes = True
+
+
+class VulcanAnalysisSummary(BaseModel):
+    """Summary counts for a VULCAN analysis."""
+
+    total_products: int
+    rhel_repos: int
+    base_images: int
+    layered_containers: int
+    app_layer_unique: int
+    recommended_trackers: int
+    dedup_ratio: str
+
+
+class VulcanAnalysisResponse(BaseModel):
+    """Full VULCAN analysis result."""
+
+    id: int
+    cve_id: Optional[str]
+    component: str
+    ps_module: Optional[str]
+    impact: Optional[str]
+    analyzed_at: datetime
+    status: str
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[str] = None
+    summary: VulcanAnalysisSummary
+    trackers: List[VulcanTrackerResponse]
+
+    class Config:
+        from_attributes = True
+
+
+class VulcanAnalysisListItem(BaseModel):
+    """Brief analysis entry for list views."""
+
+    id: int
+    cve_id: Optional[str]
+    component: str
+    ps_module: Optional[str]
+    impact: Optional[str]
+    analyzed_at: datetime
+    status: str
+    total_products: int
+    recommended_trackers: int
+
+    class Config:
+        from_attributes = True
+
+
+class VulcanResolveRequest(BaseModel):
+    """Request to resolve a VULCAN analysis."""
+
+    resolved_by: str = Field(..., description="RHSA ID (e.g., 'RHSA-2026:1234')")
 
 
 class RemoteScanCreate(BaseModel):

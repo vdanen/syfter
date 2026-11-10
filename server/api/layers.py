@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, distinct, collate, update
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, Scan, Package, ImageLayer
+from ..db import get_db, Product, Scan, Package, ImageLayer, ComponentRelationship
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,111 @@ class LayerPackageResponse(BaseModel):
 
 
 # --- Endpoints ---
+# Static routes must be registered before /{product_name}/{product_version}
+# or FastAPI will match "search"/"packages" as product name/version.
+
+
+@router.get("/search/packages")
+def search_packages_by_layer(
+    name: Optional[str] = Query(default=None, description="Package name pattern (use % as wildcard)"),
+    pkg_version: Optional[str] = Query(default=None, description="Package version pattern"),
+    layer_type: Optional[str] = Query(default=None, description="'base' or 'app'"),
+    product_name: Optional[str] = Query(default=None, description="Filter by product name"),
+    limit: int = Query(default=100, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, description="Offset for pagination"),
+    db: Session = Depends(get_db),
+):
+    """
+    Search packages across products with layer type filter.
+
+    Example: "Which products ship openssl from their base image?"
+      GET /api/v1/layers/search/packages?name=openssl%&layer_type=base
+    """
+    from .queries import _apply_like_filter
+
+    inner = db.query(Package.id)
+
+    if product_name:
+        inner = inner.join(Product, Package.product_id == Product.id)
+        inner = inner.filter(Product.name == product_name)
+
+    if layer_type:
+        inner = inner.join(
+            ImageLayer,
+            (Package.layer_id == ImageLayer.layer_id) & (Package.scan_id == ImageLayer.scan_id),
+        )
+        if layer_type == "base":
+            inner = inner.filter(ImageLayer.is_base == True)
+        elif layer_type == "app":
+            inner = inner.filter(ImageLayer.is_base == False)
+
+    inner = _apply_like_filter(inner, Package.name, name)
+    inner = _apply_like_filter(inner, Package.version, pkg_version)
+    inner = inner.order_by(collate(Package.name, "C")).offset(offset).limit(limit)
+    pkg_ids = inner.subquery()
+
+    results = (
+        db.query(
+            Package.name,
+            Package.version,
+            Package.arch,
+            Package.source_image,
+            ImageLayer.is_base,
+            Product.name.label("product_name"),
+            Product.version.label("product_version"),
+        )
+        .join(pkg_ids, Package.id == pkg_ids.c.id)
+        .join(Product, Package.product_id == Product.id)
+        .outerjoin(
+            ImageLayer,
+            (Package.layer_id == ImageLayer.layer_id) & (Package.scan_id == ImageLayer.scan_id),
+        )
+        .order_by(Package.name, Product.name)
+        .all()
+    )
+
+    return [
+        {
+            "package_name": pkg_name,
+            "package_version": pkg_ver,
+            "arch": arch,
+            "source_image": src_img,
+            "is_base": is_base,
+            "product_name": prod_name,
+            "product_version": prod_ver,
+        }
+        for pkg_name, pkg_ver, arch, src_img, is_base, prod_name, prod_ver in results
+    ]
+
+
+@router.get("/chains")
+def get_layer_chains(
+    db: Session = Depends(get_db),
+):
+    """Return all container layer chains, grouped by product:version."""
+    rows = (
+        db.query(
+            Product.name,
+            Product.version,
+            ImageLayer.layer_id,
+            ImageLayer.layer_index,
+            Scan.source_path,
+        )
+        .join(Scan, ImageLayer.scan_id == Scan.id)
+        .join(Product, Scan.product_id == Product.id)
+        .order_by(Product.name, Product.version, ImageLayer.layer_index)
+        .all()
+    )
+
+    chains = {}
+    for prod_name, prod_version, layer_id, layer_index, source_path in rows:
+        key = f"{prod_name}:{prod_version}"
+        if key not in chains:
+            chains[key] = {"layers": [], "source_path": source_path}
+        chains[key]["layers"].append(layer_id)
+
+    return chains
+
 
 @router.get("/{product_name}/{product_version}")
 def get_layers(
@@ -232,108 +337,6 @@ def get_base_image(
     }
 
 
-@router.get("/search/packages")
-def search_packages_by_layer(
-    name: Optional[str] = Query(default=None, description="Package name pattern (use % as wildcard)"),
-    pkg_version: Optional[str] = Query(default=None, description="Package version pattern"),
-    layer_type: Optional[str] = Query(default=None, description="'base' or 'app'"),
-    product_name: Optional[str] = Query(default=None, description="Filter by product name"),
-    limit: int = Query(default=100, le=1000, description="Maximum results"),
-    offset: int = Query(default=0, description="Offset for pagination"),
-    db: Session = Depends(get_db),
-):
-    """
-    Search packages across products with layer type filter.
-
-    Example: "Which products ship openssl from their base image?"
-      GET /api/v1/layers/search/packages?name=openssl%&layer_type=base
-    """
-    from .queries import _apply_like_filter
-
-    inner = db.query(Package.id)
-
-    if product_name:
-        inner = inner.join(Product, Package.product_id == Product.id)
-        inner = inner.filter(Product.name == product_name)
-
-    if layer_type:
-        inner = inner.join(
-            ImageLayer,
-            (Package.layer_id == ImageLayer.layer_id) & (Package.scan_id == ImageLayer.scan_id),
-        )
-        if layer_type == "base":
-            inner = inner.filter(ImageLayer.is_base == True)
-        elif layer_type == "app":
-            inner = inner.filter(ImageLayer.is_base == False)
-
-    inner = _apply_like_filter(inner, Package.name, name)
-    inner = _apply_like_filter(inner, Package.version, pkg_version)
-    inner = inner.order_by(collate(Package.name, "C")).offset(offset).limit(limit)
-    pkg_ids = inner.subquery()
-
-    results = (
-        db.query(
-            Package.name,
-            Package.version,
-            Package.arch,
-            Package.source_image,
-            ImageLayer.is_base,
-            Product.name.label("product_name"),
-            Product.version.label("product_version"),
-        )
-        .join(pkg_ids, Package.id == pkg_ids.c.id)
-        .join(Product, Package.product_id == Product.id)
-        .outerjoin(
-            ImageLayer,
-            (Package.layer_id == ImageLayer.layer_id) & (Package.scan_id == ImageLayer.scan_id),
-        )
-        .order_by(Package.name, Product.name)
-        .all()
-    )
-
-    return [
-        {
-            "package_name": pkg_name,
-            "package_version": pkg_ver,
-            "arch": arch,
-            "source_image": src_img,
-            "is_base": is_base,
-            "product_name": prod_name,
-            "product_version": prod_ver,
-        }
-        for pkg_name, pkg_ver, arch, src_img, is_base, prod_name, prod_ver in results
-    ]
-
-
-@router.get("/chains")
-def get_layer_chains(
-    db: Session = Depends(get_db),
-):
-    """Return all container layer chains, grouped by product:version."""
-    rows = (
-        db.query(
-            Product.name,
-            Product.version,
-            ImageLayer.layer_id,
-            ImageLayer.layer_index,
-            Scan.source_path,
-        )
-        .join(Scan, ImageLayer.scan_id == Scan.id)
-        .join(Product, Scan.product_id == Product.id)
-        .order_by(Product.name, Product.version, ImageLayer.layer_index)
-        .all()
-    )
-
-    chains = {}
-    for prod_name, prod_version, layer_id, layer_index, source_path in rows:
-        key = f"{prod_name}:{prod_version}"
-        if key not in chains:
-            chains[key] = {"layers": [], "source_path": source_path}
-        chains[key]["layers"].append(layer_id)
-
-    return chains
-
-
 @router.post("/enrich")
 def enrich_layers(
     db: Session = Depends(get_db),
@@ -375,6 +378,8 @@ def enrich_layers(
     enriched = 0
     base_images_found = set()
     skipped = 0
+    packages_updated = 0
+    layers_updated = 0
 
     # Sort candidates by chain length (shortest first) for efficient prefix matching
     candidates = sorted(product_chains.items(), key=lambda x: len(x[1]["layers"]))
@@ -413,26 +418,45 @@ def enrich_layers(
         scan_id = chain_data["scan_id"]
 
         # Update ImageLayer records
-        db.execute(
+        layer_result = db.execute(
             update(ImageLayer)
             .where(ImageLayer.scan_id == scan_id, ImageLayer.layer_id.in_(base_layers))
             .values(is_base=True, source_image=best_base)
         )
 
-        # Update Package records whose layer_id matches a base layer
-        db.execute(
+        # Update Package records -- only if packages have layer_id set
+        # (SPDX-sourced packages have layer_id=NULL; for those, use
+        # ImageLayer.is_base at query time instead)
+        pkg_result = db.execute(
             update(Package)
             .where(Package.scan_id == scan_id, Package.layer_id.in_(base_layers))
             .values(source_image=best_base)
         )
 
+        # If no packages matched by layer_id, try matching by scan_id + layer_index
+        # for packages that have layer_index set
+        if pkg_result.rowcount == 0:
+            # Fall back: mark packages whose layer_index falls within the base range
+            pkg_result = db.execute(
+                update(Package)
+                .where(
+                    Package.scan_id == scan_id,
+                    Package.layer_index.isnot(None),
+                    Package.layer_index < best_base_len,
+                )
+                .values(source_image=best_base)
+            )
+
         enriched += 1
+        packages_updated += pkg_result.rowcount
+        layers_updated += layer_result.rowcount
 
     db.commit()
 
     logger.info(
         f"Layer enrichment: {enriched} products enriched, "
-        f"{len(base_images_found)} base images found, {skipped} skipped"
+        f"{len(base_images_found)} base images found, {skipped} skipped, "
+        f"{layers_updated} layer rows updated, {packages_updated} package rows updated"
     )
 
     return {
@@ -440,4 +464,115 @@ def enrich_layers(
         "base_images_found": sorted(base_images_found),
         "skipped": skipped,
         "total_products": len(product_chains),
+        "layers_updated": layers_updated,
+        "packages_updated": packages_updated,
+    }
+
+
+import re
+
+_RHEL_SUFFIX_RE = re.compile(r"-rhel-?(\d+)")
+
+
+def _infer_base_name(product_name: str) -> Optional[str]:
+    """Infer base image family from product name. Returns None if unknown or IS a base image."""
+    name_lower = product_name.lower()
+    if name_lower.startswith(("ubi9", "ubi8", "ubi7", "ubi10")):
+        return None  # this IS a base image
+    m = _RHEL_SUFFIX_RE.search(name_lower)
+    if m:
+        ver = m.group(1)
+        if "minimal" in name_lower:
+            return f"ubi{ver}-minimal"
+        return f"ubi{ver}"
+    return None
+
+
+@router.get("/{product_name}/{product_version}/ancestry")
+def get_ancestry(
+    product_name: str,
+    product_version: str,
+    db: Session = Depends(get_db),
+):
+    """Get the full parent image ancestry chain for a container product.
+
+    Recursively follows build_tool relationships to walk the full image
+    heritage: layered-image -> base-image -> micro-image -> scratch.
+    Falls back to name-based inference when no build_tool relationship exists.
+    """
+    product = (
+        db.query(Product)
+        .filter(Product.name == product_name, Product.version == product_version)
+        .first()
+    )
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    ancestry = [{
+        "product_name": product.name,
+        "product_version": product.version,
+        "depth": 0,
+        "source": "self",
+    }]
+
+    visited = {product.id}
+    current_id = product.id
+    resolution_method = "none"
+    max_depth = 10
+
+    for depth in range(1, max_depth + 1):
+        rel = (
+            db.query(ComponentRelationship)
+            .filter(
+                ComponentRelationship.parent_product_id == current_id,
+                ComponentRelationship.relationship_type == "build_tool",
+            )
+            .first()
+        )
+
+        if rel and rel.component_product_id not in visited:
+            parent = db.query(Product).filter(Product.id == rel.component_product_id).first()
+            if parent:
+                visited.add(parent.id)
+                ancestry.append({
+                    "product_name": parent.name,
+                    "product_version": parent.version,
+                    "depth": depth,
+                    "source": "build_tool",
+                })
+                current_id = parent.id
+                resolution_method = "build_tool"
+                continue
+
+        # Fallback: name-based inference (one level only)
+        if depth == 1:
+            current_product = db.query(Product).filter(Product.id == current_id).first()
+            if current_product:
+                inferred = _infer_base_name(current_product.name)
+                if inferred:
+                    base = (
+                        db.query(Product)
+                        .filter(Product.name == inferred)
+                        .order_by(Product.version.desc())
+                        .first()
+                    )
+                    if base and base.id not in visited:
+                        visited.add(base.id)
+                        ancestry.append({
+                            "product_name": base.name,
+                            "product_version": base.version,
+                            "depth": depth,
+                            "source": "name_inference",
+                        })
+                        current_id = base.id
+                        resolution_method = "name_inference"
+                        continue
+        break
+
+    return {
+        "product_name": product_name,
+        "product_version": product_version,
+        "ancestry": ancestry,
+        "total_depth": len(ancestry) - 1,
+        "resolution_method": resolution_method,
     }

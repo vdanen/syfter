@@ -2,11 +2,29 @@
 S3/MinIO storage backend.
 """
 
+from typing import Optional
+
 import boto3
 from botocore.exceptions import ClientError
 
 from .base import StorageBackend
 from ..config import StorageConfig
+
+
+def normalize_s3_endpoint(endpoint: Optional[str]) -> Optional[str]:
+    """Ensure endpoint URLs include a scheme for boto3.
+
+    OBC BUCKET_HOST values are often bare hostnames (e.g. s3-us-east-1.amazonaws.com).
+    boto3 requires https:// or http:// when endpoint_url is set.
+    """
+    if not endpoint:
+        return None
+    endpoint = endpoint.strip()
+    if not endpoint:
+        return None
+    if endpoint.startswith(("http://", "https://")):
+        return endpoint
+    return f"https://{endpoint}"
 
 
 class S3Storage(StorageBackend):
@@ -30,8 +48,9 @@ class S3Storage(StorageBackend):
         }
 
         # If endpoint is specified, it's MinIO or compatible
-        if config.s3_endpoint:
-            client_kwargs["endpoint_url"] = config.s3_endpoint
+        self._custom_endpoint = normalize_s3_endpoint(config.s3_endpoint)
+        if self._custom_endpoint:
+            client_kwargs["endpoint_url"] = self._custom_endpoint
             client_kwargs["config"] = boto3.session.Config(
                 signature_version="s3v4",
                 s3={"addressing_style": "path"},
@@ -41,12 +60,13 @@ class S3Storage(StorageBackend):
 
         # Create a separate client for external presigned URLs if configured
         self.external_client = None
-        if config.s3_external_endpoint and config.s3_external_endpoint != config.s3_endpoint:
+        external_endpoint = normalize_s3_endpoint(config.s3_external_endpoint)
+        if external_endpoint and external_endpoint != self._custom_endpoint:
             external_kwargs = {
                 "aws_access_key_id": config.s3_access_key,
                 "aws_secret_access_key": config.s3_secret_key,
                 "region_name": config.s3_region,
-                "endpoint_url": config.s3_external_endpoint,
+                "endpoint_url": external_endpoint,
                 "config": boto3.session.Config(
                     signature_version="s3v4",
                     s3={"addressing_style": "path"},
@@ -65,7 +85,7 @@ class S3Storage(StorageBackend):
             error_code = e.response.get("Error", {}).get("Code", "")
             if error_code == "404":
                 # Bucket doesn't exist, create it
-                if self.config.s3_endpoint:
+                if self._custom_endpoint:
                     # MinIO doesn't need location constraint
                     self.client.create_bucket(Bucket=self.bucket)
                 else:

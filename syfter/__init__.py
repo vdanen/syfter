@@ -9,5 +9,5 @@ This tool provides:
 - Server mode with PostgreSQL and S3 for distributed deployments
 """
 
-__version__ = "0.9.1.0"
-__author__ = "Red Hat"
+__version__ = "0.9.2.0"
+__author__ = "Vincent Danen"
