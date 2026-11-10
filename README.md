@@ -1,6 +1,13 @@
 # Syfter
 
-A fork of [syfter](https://github.com/vdanen/syfter) hardened for multi-team, large-scale SBOM management. Adds authentication, rate limiting, response caching, recursive SBOM extraction, dependency graph parsing, RPM dependency tracking, cross-product tracing, container attestation indexing, and query performance fixes for 20M+ package deployments.
+
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/11827/badge)](https://www.bestpractices.dev/projects/11827)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vdanen/syfter/badge)](https://scorecard.dev/viewer/?uri=github.com/vdanen/syfter)
+![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/vdanen/syfter?sort=semver)
+![PyPI release](https://img.shields.io/pypi/s/syfter)
+![Downloads](https://static.pepy.tech/badge/syfter)
+
+SBOM generation and management tool using [Syft](https://github.com/anchore/syft) designed for multi-team, large-scale SBOM management. Adds authentication, rate limiting, response caching, recursive SBOM extraction, dependency graph parsing, RPM dependency tracking, cross-product tracing, container attestation indexing, and query performance fixes for 20M+ package deployments.
 
 ## What This Fork Adds
 
