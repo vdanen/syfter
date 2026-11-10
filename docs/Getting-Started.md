@@ -1,10 +1,10 @@
 # Syfter Getting Started Guide
 
-Syfter is an SBOM (Software Bill of Materials) server that catalogs RPM packages across Red Hat products. It provides both a web interface and a CLI for querying package data, searching across products, and exporting SBOMs.
+Syfter collects and catalogs SBOM data from RPM repositories, container images, and other sources. Its API server, web dashboard, and CLI support SBOM and package-list imports, package and dependency queries, scan tagging, and SBOM export.
 
 ## Prerequisites
 
-- Python 3.10+ installed
+- Python 3.11+ installed
 - [uv](https://docs.astral.sh/uv/) package manager (recommended) or pip
 - An API key (provided by your team lead)
 - VPN access to the Red Hat network (for browser access)
@@ -43,7 +43,7 @@ pipx install git+https://github.com/vdanen/syfter
 syfter --version
 ```
 
-> **Note:** If you have an older `syfter` install from PyPI without API key support, uninstall it first (`uv tool uninstall syfter` or `pip uninstall syfter`) and reinstall from the repository above.
+> **Note:** Use Syfter 0.9.2.0 or newer for API key authentication. Check the installed version with `syfter --version`.
 
 ## 2. Configure Environment Variables
 

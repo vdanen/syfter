@@ -2,6 +2,8 @@
 
 This guide covers deploying the Syfter server and clients for production use.
 
+For the complete environment-variable list, see [Server Configuration](SERVER-CONFIGURATION.md). For route details, see the [API Reference](API-REFERENCE.md).
+
 ## Architecture Overview
 
 ```
@@ -284,13 +286,23 @@ syfter export -p rhel -v 10.0 -f spdx-json -o rhel-10.spdx.json
 
 1. **Use HTTPS**: Put a reverse proxy (nginx, HAProxy) in front of the API with TLS
 2. **Firewall**: Restrict access to PostgreSQL and MinIO ports
-3. **Authentication**: Consider adding API key authentication (not yet implemented)
+3. **Authentication**: API key authentication is enabled by default. Set an initial admin key and configure OIDC if bearer-token authentication is needed; see [Server Configuration](SERVER-CONFIGURATION.md).
 
 ### Scaling
 
 1. **API Workers**: Increase `SYFTER_WORKERS` for more concurrent requests
 2. **PostgreSQL**: Consider connection pooling (pgbouncer) for 30+ clients
 3. **MinIO**: Can be clustered for high availability
+
+For large catalogs, review these PostgreSQL indexes and create any that are missing from the database:
+
+```sql
+CREATE INDEX idx_package_name_c ON packages (name COLLATE "C");
+CREATE INDEX idx_package_name_pattern ON packages (name text_pattern_ops);
+CREATE INDEX idx_packages_product_id ON packages (product_id);
+CREATE INDEX idx_scan_product ON scans (product_id);
+CREATE INDEX idx_dep_package_type ON dependencies (package_id, dependency_type);
+```
 
 ### Backup
 
