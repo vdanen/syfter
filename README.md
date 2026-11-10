@@ -45,31 +45,48 @@ Tested in production with:
 - 1,038 cosign attestation records
 - All query endpoints < 2 seconds
 
-## Install the CLI
+## Installation
 
-### macOS
-
-```bash
-uv tool install "git+https://github.com/north-echo/syfter@develop"
-```
-
-Or with pip:
+### Using uv (recommended)
 
 ```bash
-pip install "git+https://github.com/north-echo/syfter@develop"
+# Install as a standalone CLI tool (isolated environment)
+uv tool install syfter
+
+# Or install with server components
+uv tool install "syfter[server]"
+
+# Upgrade to latest version
+uv tool upgrade syfter
 ```
 
-### Linux
+### Using pip
 
 ```bash
-pip install "git+https://github.com/north-echo/syfter@develop"
+# Install from PyPI
+pip install syfter
+
+# Install with server components
+pip install "syfter[server]"
 ```
 
-If you hit PEP 668 restrictions, use `pipx` or `uv`:
+### From Source
 
 ```bash
-pipx install "git+https://github.com/north-echo/syfter@develop"
+git clone https://github.com/vdanen/syfter.git
+cd syfter
+
+# Using uv
+uv tool install .
+
+# Or using pip
+pip install -e .
+
+# Install with all components (server + dev tools)
+pip install -e ".[all]"
 ```
+
+See [docs/BUILDING.md](docs/BUILDING.md) for detailed build and distribution options.
 
 ### Verify
 
@@ -292,8 +309,5 @@ A typical deployment includes:
 
 ## License
 
-Apache License 2.0 -- same as upstream syfter.
+Apache License 2.0
 
-## Credits
-
-Based on [syfter](https://github.com/vdanen/syfter) by Vincent Danen.
